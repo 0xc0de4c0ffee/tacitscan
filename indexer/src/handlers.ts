@@ -124,6 +124,26 @@ export async function persistEnvelope(
       return persistTDclaim(db, env, ctx, base);
     case "T_AXFER_VAR":
       return persistTAxferVar(db, env, ctx, base);
+    case "T_CXFER_BPP":
+      return persistTCxferBpp(db, env, ctx, base);
+    case "T_WRAPPER_ATTEST":
+      return persistTWrapperAttest(db, env, ctx, base);
+    case "T_SLOT_MINT":
+      return persistTSlotMint(db, env, ctx, base);
+    case "T_SLOT_BURN":
+      return persistTSlotBurn(db, env, ctx, base);
+    case "T_SLOT_ROTATE":
+      return persistTSlotRotate(db, env, ctx, base);
+    case "T_SLOT_SPLIT":
+      return persistTSlotSplit(db, env, ctx, base);
+    case "T_SLOT_MERGE":
+      return persistTSlotMerge(db, env, ctx, base);
+    case "T_CBTC_TAC_DEPOSIT":
+      return persistTCbtcTacDeposit(db, env, ctx, base);
+    case "T_CBTC_TAC_FORCE_CLOSE":
+      return persistTCbtcTacForceClose(db, env, ctx, base);
+    case "T_CTAC_LIEN_SPLIT":
+      return persistTCtacLienSplit(db, env, ctx, base);
   }
 }
 
@@ -574,6 +594,215 @@ async function persistTAxferVar(
       assetInputCount: env.assetInputCount,
       kernelSig: env.kernelSig,
       rangeproof: env.rangeproof,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC §5.21: T_CXFER_BPP — wire-identical to CXFER modulo opcode + BP+ rangeproof.
+// Skeleton persistence: asset_id + n + kernel_sig + rangeproof. Same layout
+// as persistCxfer for the envelope row; commitment-table inserts deferred
+// like the other skeleton-decoded opcodes.
+async function persistTCxferBpp(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_CXFER_BPP" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetId,
+      n: env.n,
+      kernelSig: env.kernelSig,
+      rangeproof: env.rangeproof,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC §5.19: T_WRAPPER_ATTEST — signed wrapper-issuer attestation.
+// Skeleton persistence: asset_id + issuer_sig. The (reserves, supply,
+// as_of_height) tuple isn't stored as scalars yet; raw_payload preserves
+// it for a future wrapper-attestation log table.
+async function persistTWrapperAttest(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_WRAPPER_ATTEST" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetId,
+      issuerSig: env.attestationSig,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-ZK §5.21: T_SLOT_MINT — atomic cBTC.zk slot mint.
+// Skeleton persistence: asset_id (wrapper) + denomination (slot size) +
+// public_amount (LP's payment in payment_asset).
+async function persistTSlotMint(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_SLOT_MINT" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetId,
+      denomination: env.denomSats,
+      publicAmount: env.paymentAmount,
+      n: 1,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-ZK §5.22: T_SLOT_BURN — atomic slot redeem.
+// Skeleton persistence: asset_id + denomination + merkle_root + nullifier_hash + proof.
+async function persistTSlotBurn(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_SLOT_BURN" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetId,
+      denomination: env.denomSats,
+      merkleRoot: bytesToHex(env.merkleRoot),
+      nullifierHash: bytesToHex(env.nullifierHash),
+      proofBytes: env.proof,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-ZK §5.23: T_SLOT_ROTATE — atomic transfer / key rotation.
+// Skeleton persistence: asset_id + denomination + old nullifier + Groth16 proof.
+async function persistTSlotRotate(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_SLOT_ROTATE" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetId,
+      denomination: env.denomSats,
+      merkleRoot: bytesToHex(env.oldMerkleRoot),
+      nullifierHash: bytesToHex(env.oldNullifierHash),
+      proofBytes: env.oldProof,
+      publicAmount: env.paymentAmount, // 0 if no payment
+      n: 1,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-ZK-FUNGIBILITY §5.24: T_SLOT_SPLIT — atomic 1→N split.
+// Skeleton: asset_id = old (most-stable single-row id), n = output count,
+// denomination = old denom, nullifier = old.
+async function persistTSlotSplit(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_SLOT_SPLIT" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetIdOld,
+      denomination: env.denomOld,
+      merkleRoot: bytesToHex(env.oldMerkleRoot),
+      nullifierHash: bytesToHex(env.oldNullifierHash),
+      proofBytes: env.oldProof,
+      n: env.outputs.length,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-ZK-FUNGIBILITY §5.25: T_SLOT_MERGE — atomic N→1 merge.
+// Skeleton: asset_id = new (the merged result), assetInputCount = n_inputs,
+// denomination = new denom, n = 1 (single output slot).
+async function persistTSlotMerge(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_SLOT_MERGE" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetIdNew,
+      denomination: env.denomNew,
+      assetInputCount: env.inputs.length,
+      n: 1,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-TAC §5.36: T_CBTC_TAC_DEPOSIT — LP-share lien mint.
+// Skeleton: target_leaf_hash stored in merkle_root (closest semantic fit —
+// a "reference" hash field that's not strictly a merkle root but
+// distinguishable by opcode). public_amount = mint_amount.
+async function persistTCbtcTacDeposit(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_CBTC_TAC_DEPOSIT" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      merkleRoot: bytesToHex(env.targetLeafHash),
+      denomination: env.slotDenomSats,
+      publicAmount: env.mintAmount,
+      proofBytes: env.proof,
+      n: 1,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-TAC §5.38: T_CBTC_TAC_FORCE_CLOSE — permissionless liquidation.
+// Skeleton: target_leaf_hash in merkle_root, no asset payment.
+async function persistTCbtcTacForceClose(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_CBTC_TAC_FORCE_CLOSE" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      merkleRoot: bytesToHex(env.targetLeafHash),
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC-CBTC-TAC §5.47.6: T_CTAC_LIEN_SPLIT — split a liened LP-share UTXO.
+// Skeleton: position_leaf_hash in merkle_root, n = output count.
+async function persistTCtacLienSplit(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_CTAC_LIEN_SPLIT" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      merkleRoot: bytesToHex(env.positionLeafHash),
+      n: env.outputs.length,
     } as typeof schema.envelopes.$inferInsert)
     .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
 }

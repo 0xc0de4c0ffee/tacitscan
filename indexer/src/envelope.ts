@@ -5,6 +5,7 @@ import { decodeScript, extractEnvelopeFrame } from "./script.js";
 
 export const OPCODES = {
   CETCH: 0x21,
+  T_CXFER_BPP: 0x22,
   CXFER: 0x23,
   T_MINT: 0x24,
   T_BURN: 0x25,
@@ -16,10 +17,20 @@ export const OPCODES = {
   T_DROP: 0x2b,
   T_DCLAIM: 0x2c,
   T_AXFER_VAR: 0x37,
+  T_WRAPPER_ATTEST: 0x38,
+  T_SLOT_MINT: 0x43,
+  T_SLOT_BURN: 0x44,
+  T_SLOT_ROTATE: 0x45,
+  T_SLOT_SPLIT: 0x46,
+  T_SLOT_MERGE: 0x47,
+  T_CBTC_TAC_DEPOSIT: 0x49,
+  T_CBTC_TAC_FORCE_CLOSE: 0x4b,
+  T_CTAC_LIEN_SPLIT: 0x4f,
 } as const;
 
 export const OPCODE_NAMES: Record<number, string> = {
   0x21: "CETCH",
+  0x22: "T_CXFER_BPP",
   0x23: "CXFER",
   0x24: "T_MINT",
   0x25: "T_BURN",
@@ -31,6 +42,15 @@ export const OPCODE_NAMES: Record<number, string> = {
   0x2b: "T_DROP",
   0x2c: "T_DCLAIM",
   0x37: "T_AXFER_VAR",
+  0x38: "T_WRAPPER_ATTEST",
+  0x43: "T_SLOT_MINT",
+  0x44: "T_SLOT_BURN",
+  0x45: "T_SLOT_ROTATE",
+  0x46: "T_SLOT_SPLIT",
+  0x47: "T_SLOT_MERGE",
+  0x49: "T_CBTC_TAC_DEPOSIT",
+  0x4b: "T_CBTC_TAC_FORCE_CLOSE",
+  0x4f: "T_CTAC_LIEN_SPLIT",
 };
 
 const MAGIC = new TextEncoder().encode("TACIT");
@@ -166,7 +186,27 @@ export type DecodedEnvelope =
   // SPEC §5.13: permissionless claim event against a T_DROP ancestor.
   | { opcode: "T_DCLAIM"; payload: Uint8Array; assetId: string; dropRevealTxid: string; commitmentC: Uint8Array; amount: bigint; blinding: Uint8Array; witness: Uint8Array }
   // SPEC §5.7.9: variable-amount atomic settlement (N=2, asset_input_count=1).
-  | { opcode: "T_AXFER_VAR"; payload: Uint8Array; assetId: string; assetInputCount: 1; n: 2; outputs: CommitmentOut[]; rangeproof: Uint8Array; kernelSig: Uint8Array };
+  | { opcode: "T_AXFER_VAR"; payload: Uint8Array; assetId: string; assetInputCount: 1; n: 2; outputs: CommitmentOut[]; rangeproof: Uint8Array; kernelSig: Uint8Array }
+  // SPEC §5.21: T_CXFER_BPP — byte-identical to CXFER except for opcode + BP+ rangeproof.
+  | { opcode: "T_CXFER_BPP"; payload: Uint8Array; assetId: string; kernelSig: Uint8Array; n: number; outputs: CommitmentOut[]; rangeproof: Uint8Array }
+  // SPEC §5.19: T_WRAPPER_ATTEST — fixed 159-byte signed attestation, no commitments.
+  | { opcode: "T_WRAPPER_ATTEST"; payload: Uint8Array; networkTag: number; assetId: string; issuerPubkey: Uint8Array; reserves: bigint; supply: bigint; asOfHeight: number; timestamp: bigint; attestationSig: Uint8Array }
+  // SPEC-CBTC-ZK-AMENDMENT §5.21: T_SLOT_MINT — cBTC.zk slot mint, fixed 244-byte payload.
+  | { opcode: "T_SLOT_MINT"; payload: Uint8Array; networkTag: number; assetId: string; denomSats: bigint; recipientCommit: Uint8Array; leafHash: Uint8Array; paymentAssetId: string; paymentAmount: bigint; minterPubkey: Uint8Array; minterSig: Uint8Array }
+  // SPEC-CBTC-ZK-AMENDMENT §5.22: T_SLOT_BURN — atomic redeem.
+  | { opcode: "T_SLOT_BURN"; payload: Uint8Array; networkTag: number; assetId: string; denomSats: bigint; merkleRoot: Uint8Array; nullifierHash: Uint8Array; recipientCommit: Uint8Array; rLeaf: Uint8Array; bindHash: Uint8Array; proof: Uint8Array }
+  // SPEC-CBTC-ZK-AMENDMENT §5.23: T_SLOT_ROTATE — atomic transfer/key-rotation.
+  | { opcode: "T_SLOT_ROTATE"; payload: Uint8Array; networkTag: number; assetId: string; denomSats: bigint; oldMerkleRoot: Uint8Array; oldNullifierHash: Uint8Array; oldRecipientCommit: Uint8Array; oldRLeaf: Uint8Array; oldBindHash: Uint8Array; oldProof: Uint8Array; newRecipientCommit: Uint8Array; newLeafHash: Uint8Array; paymentAssetId: string; paymentAmount: bigint; oldOwnerPubkey: Uint8Array; oldOwnerSig: Uint8Array }
+  // SPEC-CBTC-ZK-FUNGIBILITY-AMENDMENT §5.24: T_SLOT_SPLIT — atomic 1→N split.
+  | { opcode: "T_SLOT_SPLIT"; payload: Uint8Array; networkTag: number; assetIdOld: string; denomOld: bigint; oldMerkleRoot: Uint8Array; oldNullifierHash: Uint8Array; oldRecipientCommit: Uint8Array; oldRLeaf: Uint8Array; oldBindHash: Uint8Array; oldProof: Uint8Array; outputs: { assetIdNew: string; denomNew: bigint; newRecipientCommit: Uint8Array; newLeafHash: Uint8Array }[]; oldOwnerPubkey: Uint8Array; oldOwnerSig: Uint8Array }
+  // SPEC-CBTC-ZK-FUNGIBILITY-AMENDMENT §5.25: T_SLOT_MERGE — atomic N→1 merge.
+  | { opcode: "T_SLOT_MERGE"; payload: Uint8Array; networkTag: number; inputs: { assetIdOld: string; denomOld: bigint; oldMerkleRoot: Uint8Array; oldNullifierHash: Uint8Array; oldRecipientCommit: Uint8Array; oldRLeaf: Uint8Array; oldBindHash: Uint8Array; oldProof: Uint8Array }[]; assetIdNew: string; denomNew: bigint; newRecipientCommit: Uint8Array; newLeafHash: Uint8Array; newOwnerPubkey: Uint8Array; newOwnerSig: Uint8Array }
+  // SPEC-CBTC-TAC-AMENDMENT §5.36: T_CBTC_TAC_DEPOSIT — LP-share lien mint.
+  | { opcode: "T_CBTC_TAC_DEPOSIT"; payload: Uint8Array; networkTag: number; targetLeafHash: Uint8Array; slotDenomSats: bigint; bondAmountTac: bigint; bondSourceOutpoint: Uint8Array; bondCommit: Uint8Array; depositorRecoveryPk: Uint8Array; mintAmount: bigint; mintRecipientCommit: Uint8Array; bindHash: Uint8Array; proof: Uint8Array }
+  // SPEC-CBTC-TAC-AMENDMENT §5.38: T_CBTC_TAC_FORCE_CLOSE — permissionless liquidation. Fixed 106 bytes.
+  | { opcode: "T_CBTC_TAC_FORCE_CLOSE"; payload: Uint8Array; networkTag: number; targetLeafHash: Uint8Array; liquidatorPayoutPk: Uint8Array; ammSwapMinBtcOut: bigint; bindHash: Uint8Array }
+  // SPEC-CBTC-TAC-AMENDMENT §5.47.6: T_CTAC_LIEN_SPLIT — split a liened LP-share UTXO.
+  | { opcode: "T_CTAC_LIEN_SPLIT"; payload: Uint8Array; networkTag: number; positionLeafHash: Uint8Array; sourceOutpoint: Uint8Array; outputs: { amount: bigint; blinding: Uint8Array; commit: Uint8Array }[]; lienInheritIndex: number; depositorSig: Uint8Array; bindHash: Uint8Array };
 
 export type DecodeResult =
   | { ok: true; envelope: DecodedEnvelope; rawPayload: Uint8Array }
@@ -246,6 +286,36 @@ export function decodePayload(payload: Uint8Array): DecodeResult {
         break;
       case OPCODES.T_AXFER_VAR:
         envelope = decodeTAxferVar(payload, c);
+        break;
+      case OPCODES.T_CXFER_BPP:
+        envelope = decodeTCxferBpp(payload, c);
+        break;
+      case OPCODES.T_WRAPPER_ATTEST:
+        envelope = decodeTWrapperAttest(payload, c);
+        break;
+      case OPCODES.T_SLOT_MINT:
+        envelope = decodeTSlotMint(payload, c);
+        break;
+      case OPCODES.T_SLOT_BURN:
+        envelope = decodeTSlotBurn(payload, c);
+        break;
+      case OPCODES.T_SLOT_ROTATE:
+        envelope = decodeTSlotRotate(payload, c);
+        break;
+      case OPCODES.T_SLOT_SPLIT:
+        envelope = decodeTSlotSplit(payload, c);
+        break;
+      case OPCODES.T_SLOT_MERGE:
+        envelope = decodeTSlotMerge(payload, c);
+        break;
+      case OPCODES.T_CBTC_TAC_DEPOSIT:
+        envelope = decodeTCbtcTacDeposit(payload, c);
+        break;
+      case OPCODES.T_CBTC_TAC_FORCE_CLOSE:
+        envelope = decodeTCbtcTacForceClose(payload, c);
+        break;
+      case OPCODES.T_CTAC_LIEN_SPLIT:
+        envelope = decodeTCtacLienSplit(payload, c);
         break;
       default:
         return { ok: false, reason: `unknown opcode 0x${op.toString(16)}`, rawPayload: payload };
@@ -626,4 +696,195 @@ function decodeTAxferVar(payload: Uint8Array, c: Cursor): DecodedEnvelope {
     rangeproof,
     kernelSig,
   };
+}
+
+// SPEC §5.21: T_CXFER_BPP — confidential transfer w/ Bulletproofs+ rangeproof.
+// Byte-identical to CXFER except for the opcode + bp+ rangeproof bytes.
+function decodeTCxferBpp(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const assetId = bytesToHex(c.takeBytes(32));
+  const kernelSig = c.takeBytes(64);
+  const n = c.takeU8();
+  if (![1, 2, 4, 8].includes(n)) throw new Error(`bad N=${n}`);
+  const outputs: CommitmentOut[] = [];
+  for (let i = 0; i < n; i++) {
+    outputs.push({
+      vout: i,
+      commitmentC: c.takeBytes(33),
+      encryptedAmount: c.takeBytes(8),
+    });
+  }
+  const rpLen = c.takeU16LE();
+  const rangeproof = c.takeBytes(rpLen);
+  return { opcode: "T_CXFER_BPP", payload, assetId, kernelSig, n, outputs, rangeproof };
+}
+
+// SPEC §5.19: T_WRAPPER_ATTEST — fixed-159-byte signed attestation.
+function decodeTWrapperAttest(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const assetId = bytesToHex(c.takeBytes(32));
+  const issuerPubkey = c.takeBytes(33);
+  const reserves = c.takeU64LE();
+  const supply = c.takeU64LE();
+  const asOfHeight = c.takeU32LE();
+  const timestamp = c.takeU64LE();
+  const attestationSig = c.takeBytes(64);
+  return { opcode: "T_WRAPPER_ATTEST", payload, networkTag, assetId, issuerPubkey, reserves, supply, asOfHeight, timestamp, attestationSig };
+}
+
+// SPEC-CBTC-ZK-AMENDMENT §5.21: T_SLOT_MINT — fixed 244-byte payload.
+function decodeTSlotMint(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const assetId = bytesToHex(c.takeBytes(32));
+  const denomSats = c.takeU64LE();
+  const recipientCommit = c.takeBytes(33);
+  const leafHash = c.takeBytes(32);
+  const paymentAssetId = bytesToHex(c.takeBytes(32));
+  const paymentAmount = c.takeU64LE();
+  const minterPubkey = c.takeBytes(33);
+  const minterSig = c.takeBytes(64);
+  return { opcode: "T_SLOT_MINT", payload, networkTag, assetId, denomSats, recipientCommit, leafHash, paymentAssetId, paymentAmount, minterPubkey, minterSig };
+}
+
+// SPEC-CBTC-ZK-AMENDMENT §5.22: T_SLOT_BURN — header + Groth16 proof.
+function decodeTSlotBurn(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const assetId = bytesToHex(c.takeBytes(32));
+  const denomSats = c.takeU64LE();
+  const merkleRoot = c.takeBytes(32);
+  const nullifierHash = c.takeBytes(32);
+  const recipientCommit = c.takeBytes(33);
+  const rLeaf = c.takeBytes(32);
+  const bindHash = c.takeBytes(32);
+  const proofLen = c.takeU16LE();
+  const proof = c.takeBytes(proofLen);
+  return { opcode: "T_SLOT_BURN", payload, networkTag, assetId, denomSats, merkleRoot, nullifierHash, recipientCommit, rLeaf, bindHash, proof };
+}
+
+// SPEC-CBTC-ZK-AMENDMENT §5.23: T_SLOT_ROTATE — OLD note + NEW note + optional payment.
+function decodeTSlotRotate(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const assetId = bytesToHex(c.takeBytes(32));
+  const denomSats = c.takeU64LE();
+  // OLD note (consumed)
+  const oldMerkleRoot = c.takeBytes(32);
+  const oldNullifierHash = c.takeBytes(32);
+  const oldRecipientCommit = c.takeBytes(33);
+  const oldRLeaf = c.takeBytes(32);
+  const oldBindHash = c.takeBytes(32);
+  const oldProofLen = c.takeU16LE();
+  const oldProof = c.takeBytes(oldProofLen);
+  // NEW note
+  const newRecipientCommit = c.takeBytes(33);
+  const newLeafHash = c.takeBytes(32);
+  // Optional payment leg
+  const paymentAssetId = bytesToHex(c.takeBytes(32));
+  const paymentAmount = c.takeU64LE();
+  // Binding sig
+  const oldOwnerPubkey = c.takeBytes(33);
+  const oldOwnerSig = c.takeBytes(64);
+  return { opcode: "T_SLOT_ROTATE", payload, networkTag, assetId, denomSats, oldMerkleRoot, oldNullifierHash, oldRecipientCommit, oldRLeaf, oldBindHash, oldProof, newRecipientCommit, newLeafHash, paymentAssetId, paymentAmount, oldOwnerPubkey, oldOwnerSig };
+}
+
+// SPEC-CBTC-ZK-FUNGIBILITY-AMENDMENT §5.24: T_SLOT_SPLIT.
+function decodeTSlotSplit(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const assetIdOld = bytesToHex(c.takeBytes(32));
+  const denomOld = c.takeU64LE();
+  const oldMerkleRoot = c.takeBytes(32);
+  const oldNullifierHash = c.takeBytes(32);
+  const oldRecipientCommit = c.takeBytes(33);
+  const oldRLeaf = c.takeBytes(32);
+  const oldBindHash = c.takeBytes(32);
+  const oldProofLen = c.takeU16LE();
+  const oldProof = c.takeBytes(oldProofLen);
+  const nOutputs = c.takeU8();
+  if (nOutputs < 2 || nOutputs > 16) throw new Error(`bad n_outputs=${nOutputs}`);
+  const outputs: { assetIdNew: string; denomNew: bigint; newRecipientCommit: Uint8Array; newLeafHash: Uint8Array }[] = [];
+  for (let i = 0; i < nOutputs; i++) {
+    outputs.push({
+      assetIdNew: bytesToHex(c.takeBytes(32)),
+      denomNew: c.takeU64LE(),
+      newRecipientCommit: c.takeBytes(33),
+      newLeafHash: c.takeBytes(32),
+    });
+  }
+  const oldOwnerPubkey = c.takeBytes(33);
+  const oldOwnerSig = c.takeBytes(64);
+  return { opcode: "T_SLOT_SPLIT", payload, networkTag, assetIdOld, denomOld, oldMerkleRoot, oldNullifierHash, oldRecipientCommit, oldRLeaf, oldBindHash, oldProof, outputs, oldOwnerPubkey, oldOwnerSig };
+}
+
+// SPEC-CBTC-ZK-FUNGIBILITY-AMENDMENT §5.25: T_SLOT_MERGE.
+function decodeTSlotMerge(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const nInputs = c.takeU8();
+  if (nInputs < 2 || nInputs > 16) throw new Error(`bad n_inputs=${nInputs}`);
+  const inputs: { assetIdOld: string; denomOld: bigint; oldMerkleRoot: Uint8Array; oldNullifierHash: Uint8Array; oldRecipientCommit: Uint8Array; oldRLeaf: Uint8Array; oldBindHash: Uint8Array; oldProof: Uint8Array }[] = [];
+  for (let i = 0; i < nInputs; i++) {
+    const assetIdOld = bytesToHex(c.takeBytes(32));
+    const denomOld = c.takeU64LE();
+    const oldMerkleRoot = c.takeBytes(32);
+    const oldNullifierHash = c.takeBytes(32);
+    const oldRecipientCommit = c.takeBytes(33);
+    const oldRLeaf = c.takeBytes(32);
+    const oldBindHash = c.takeBytes(32);
+    const oldProofLen = c.takeU16LE();
+    const oldProof = c.takeBytes(oldProofLen);
+    inputs.push({ assetIdOld, denomOld, oldMerkleRoot, oldNullifierHash, oldRecipientCommit, oldRLeaf, oldBindHash, oldProof });
+  }
+  const assetIdNew = bytesToHex(c.takeBytes(32));
+  const denomNew = c.takeU64LE();
+  const newRecipientCommit = c.takeBytes(33);
+  const newLeafHash = c.takeBytes(32);
+  const newOwnerPubkey = c.takeBytes(33);
+  const newOwnerSig = c.takeBytes(64);
+  return { opcode: "T_SLOT_MERGE", payload, networkTag, inputs, assetIdNew, denomNew, newRecipientCommit, newLeafHash, newOwnerPubkey, newOwnerSig };
+}
+
+// SPEC-CBTC-TAC-AMENDMENT §5.36: T_CBTC_TAC_DEPOSIT — LP-share lien mint.
+function decodeTCbtcTacDeposit(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const targetLeafHash = c.takeBytes(32);
+  const slotDenomSats = c.takeU64LE();
+  const bondAmountTac = c.takeU64LE();
+  const bondSourceOutpoint = c.takeBytes(36); // 32-byte txid + 4-byte vout
+  const bondCommit = c.takeBytes(33);
+  const depositorRecoveryPk = c.takeBytes(33);
+  const mintAmount = c.takeU64LE();
+  const mintRecipientCommit = c.takeBytes(33);
+  const bindHash = c.takeBytes(32);
+  const proofLen = c.takeU16LE();
+  const proof = c.takeBytes(proofLen);
+  return { opcode: "T_CBTC_TAC_DEPOSIT", payload, networkTag, targetLeafHash, slotDenomSats, bondAmountTac, bondSourceOutpoint, bondCommit, depositorRecoveryPk, mintAmount, mintRecipientCommit, bindHash, proof };
+}
+
+// SPEC-CBTC-TAC-AMENDMENT §5.38: T_CBTC_TAC_FORCE_CLOSE — fixed 107-byte payload.
+function decodeTCbtcTacForceClose(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const targetLeafHash = c.takeBytes(32);
+  const liquidatorPayoutPk = c.takeBytes(33);
+  const ammSwapMinBtcOut = c.takeU64LE();
+  const bindHash = c.takeBytes(32);
+  return { opcode: "T_CBTC_TAC_FORCE_CLOSE", payload, networkTag, targetLeafHash, liquidatorPayoutPk, ammSwapMinBtcOut, bindHash };
+}
+
+// SPEC-CBTC-TAC-AMENDMENT §5.47.6: T_CTAC_LIEN_SPLIT — split a liened LP-share UTXO.
+function decodeTCtacLienSplit(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const networkTag = c.takeU8();
+  const positionLeafHash = c.takeBytes(32);
+  const sourceOutpoint = c.takeBytes(36);
+  const outputCount = c.takeU8();
+  if (outputCount < 2 || outputCount > 8) throw new Error(`bad output_count=${outputCount}`);
+  const outputs: { amount: bigint; blinding: Uint8Array; commit: Uint8Array }[] = [];
+  for (let i = 0; i < outputCount; i++) {
+    outputs.push({
+      amount: c.takeU64LE(),
+      blinding: c.takeBytes(32),
+      commit: c.takeBytes(33),
+    });
+  }
+  const lienInheritIndex = c.takeU8();
+  if (lienInheritIndex >= outputCount) throw new Error(`lien_inherit_index ${lienInheritIndex} >= output_count ${outputCount}`);
+  const depositorSig = c.takeBytes(64);
+  const bindHash = c.takeBytes(32);
+  return { opcode: "T_CTAC_LIEN_SPLIT", payload, networkTag, positionLeafHash, sourceOutpoint, outputs, lienInheritIndex, depositorSig, bindHash };
 }

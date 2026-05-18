@@ -114,6 +114,86 @@ function buildUpdateSet(env: DecodedEnvelope): Partial<typeof schema.envelopes.$
         kernelSig: env.kernelSig,
         rangeproof: env.rangeproof,
       };
+    case "T_CXFER_BPP":
+      return {
+        ...base,
+        assetId: env.assetId,
+        n: env.n,
+        kernelSig: env.kernelSig,
+        rangeproof: env.rangeproof,
+      };
+    case "T_WRAPPER_ATTEST":
+      return {
+        ...base,
+        assetId: env.assetId,
+        issuerSig: env.attestationSig,
+      };
+    case "T_SLOT_MINT":
+      return {
+        ...base,
+        assetId: env.assetId,
+        denomination: env.denomSats,
+        publicAmount: env.paymentAmount,
+        n: 1,
+      };
+    case "T_SLOT_BURN":
+      return {
+        ...base,
+        assetId: env.assetId,
+        denomination: env.denomSats,
+        merkleRoot: bytesToHex(env.merkleRoot),
+        nullifierHash: bytesToHex(env.nullifierHash),
+        proofBytes: env.proof,
+      };
+    case "T_SLOT_ROTATE":
+      return {
+        ...base,
+        assetId: env.assetId,
+        denomination: env.denomSats,
+        merkleRoot: bytesToHex(env.oldMerkleRoot),
+        nullifierHash: bytesToHex(env.oldNullifierHash),
+        proofBytes: env.oldProof,
+        publicAmount: env.paymentAmount,
+        n: 1,
+      };
+    case "T_SLOT_SPLIT":
+      return {
+        ...base,
+        assetId: env.assetIdOld,
+        denomination: env.denomOld,
+        merkleRoot: bytesToHex(env.oldMerkleRoot),
+        nullifierHash: bytesToHex(env.oldNullifierHash),
+        proofBytes: env.oldProof,
+        n: env.outputs.length,
+      };
+    case "T_SLOT_MERGE":
+      return {
+        ...base,
+        assetId: env.assetIdNew,
+        denomination: env.denomNew,
+        assetInputCount: env.inputs.length,
+        n: 1,
+      };
+    case "T_CBTC_TAC_DEPOSIT":
+      return {
+        ...base,
+        merkleRoot: bytesToHex(env.targetLeafHash),
+        denomination: env.slotDenomSats,
+        publicAmount: env.mintAmount,
+        proofBytes: env.proof,
+        n: 1,
+      };
+    case "T_CBTC_TAC_FORCE_CLOSE":
+      return {
+        ...base,
+        merkleRoot: bytesToHex(env.targetLeafHash),
+      };
+    case "T_CTAC_LIEN_SPLIT":
+      return {
+        ...base,
+        merkleRoot: bytesToHex(env.positionLeafHash),
+        n: env.outputs.length,
+      };
     // The originally-shipped opcodes shouldn't appear in this backfill
     // (they were already recognized when the envelope was ingested), but
     // be defensive in case of future shifts: skip rather than partially
