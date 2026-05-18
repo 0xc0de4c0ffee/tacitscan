@@ -118,6 +118,12 @@ export async function persistEnvelope(
       return persistTDeposit(db, env, ctx, base);
     case "T_WITHDRAW":
       return persistTWithdraw(db, env, ctx, base);
+    case "T_DROP":
+      return persistTDrop(db, env, ctx, base);
+    case "T_DCLAIM":
+      return persistTDclaim(db, env, ctx, base);
+    case "T_AXFER_VAR":
+      return persistTAxferVar(db, env, ctx, base);
   }
 }
 
@@ -479,4 +485,95 @@ async function persistTWithdraw(
       })
       .onConflictDoNothing();
   });
+}
+
+// SPEC §5.12: T_DROP — supply-locking deposit into a public-claim pool.
+// Skeleton persistence: record opcode + asset_id + key scalars so the UI
+// can show the event in context. Sig / merkle / per-input-commitment
+// validation is deferred (we don't validate Schnorr today on T_DROP).
+//
+// Two shapes share the row layout:
+//   standard:  public_amount = cap_amount, burned_amount = per_claim,
+//              merkle_root, asset_input_count, kernel_sig
+//   reclaim:   public_amount = cap_amount, burned_amount = 0 (sentinel),
+//              etch_txid = reclaim_drop_id (parent reference)
+// The shape is recoverable from the row by checking burned_amount == 0
+// (reclaim) vs > 0 (standard); the raw_payload is also stored verbatim
+// for any future need.
+async function persistTDrop(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_DROP" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  const shared = {
+    ...(base as object),
+    assetId: env.assetId,
+    publicAmount: env.capAmount,
+  };
+  const shapeFields = env.isReclaim
+    ? {
+        burnedAmount: 0n,
+        etchTxid: env.reclaimDropId,
+      }
+    : {
+        burnedAmount: env.perClaim,
+        merkleRoot: bytesToHex(env.merkleRoot),
+        assetInputCount: env.assetInputCount,
+        kernelSig: env.kernelSig,
+      };
+  await db
+    .insert(schema.envelopes)
+    .values({ ...shared, ...shapeFields } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+  // T_DROP (standard) produces no tacit UTXO at vout[0]; reclaim does, but
+  // we defer the commitment-table insert until a future commitment audit
+  // pass — skeleton is just envelope-row visibility.
+}
+
+// SPEC §5.13: T_DCLAIM — permissionless claim event.
+// Skeleton persistence: opcode + asset_id + parent drop_reveal_txid +
+// public amount. The commitment opens to (amount, blinding) — public —
+// but we don't insert into commitments yet since the validator path for
+// these isn't in place.
+async function persistTDclaim(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_DCLAIM" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetId,
+      etchTxid: env.dropRevealTxid, // re-use etch_txid as the "parent envelope" slot, same as T_PMINT
+      publicAmount: env.amount,
+      n: 1, // T_DCLAIM produces a single recipient UTXO at vout[0]
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
+}
+
+// SPEC §5.7.9: T_AXFER_VAR — variable-amount atomic settlement.
+// Skeleton persistence: opcode + asset_id + n=2 + asset_input_count=1 +
+// rangeproof bytes + kernel sig. Vout layout is interleaved (tacit at
+// {0,2}, BTC payment at 1, OP_RETURN at 3); commitments aren't indexed
+// into the per-output table yet.
+async function persistTAxferVar(
+  db: DB,
+  env: Extract<DecodedEnvelope, { opcode: "T_AXFER_VAR" }>,
+  ctx: TxCtx,
+  base: object,
+) {
+  await db
+    .insert(schema.envelopes)
+    .values({
+      ...(base as object),
+      assetId: env.assetId,
+      n: env.n,
+      assetInputCount: env.assetInputCount,
+      kernelSig: env.kernelSig,
+      rangeproof: env.rangeproof,
+    } as typeof schema.envelopes.$inferInsert)
+    .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
 }

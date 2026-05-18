@@ -13,6 +13,9 @@ export const OPCODES = {
   T_PMINT: 0x28,
   T_DEPOSIT: 0x29,
   T_WITHDRAW: 0x2a,
+  T_DROP: 0x2b,
+  T_DCLAIM: 0x2c,
+  T_AXFER_VAR: 0x37,
 } as const;
 
 export const OPCODE_NAMES: Record<number, string> = {
@@ -25,6 +28,9 @@ export const OPCODE_NAMES: Record<number, string> = {
   0x28: "T_PMINT",
   0x29: "T_DEPOSIT",
   0x2a: "T_WITHDRAW",
+  0x2b: "T_DROP",
+  0x2c: "T_DCLAIM",
+  0x37: "T_AXFER_VAR",
 };
 
 const MAGIC = new TextEncoder().encode("TACIT");
@@ -152,7 +158,15 @@ export type DecodedEnvelope =
   | { opcode: "T_PMINT"; payload: Uint8Array; assetId: string; etchTxid: string; commitmentC: Uint8Array; amount: bigint; blinding: Uint8Array }
   | { opcode: "T_DEPOSIT"; payload: Uint8Array; assetId: string; denomination: bigint; leafCommitment: Uint8Array; kernelSig: Uint8Array; isPoolInit: false }
   | { opcode: "T_DEPOSIT"; payload: Uint8Array; assetId: string; denomination: 0n; isPoolInit: true; poolDenom: bigint; vkCid: string; ceremonyCid: string; initSig: Uint8Array }
-  | { opcode: "T_WITHDRAW"; payload: Uint8Array; assetId: string; denomination: bigint; merkleRoot: Uint8Array; nullifierHash: Uint8Array; recipientCommitment: Uint8Array; rLeaf: Uint8Array; bindHash: Uint8Array; proof: Uint8Array };
+  | { opcode: "T_WITHDRAW"; payload: Uint8Array; assetId: string; denomination: bigint; merkleRoot: Uint8Array; nullifierHash: Uint8Array; recipientCommitment: Uint8Array; rLeaf: Uint8Array; bindHash: Uint8Array; proof: Uint8Array }
+  // SPEC §5.12 standard shape (per_claim > 0): supply-locking deposit into a public-claim pool.
+  | { opcode: "T_DROP"; payload: Uint8Array; assetId: string; capAmount: bigint; perClaim: bigint; merkleRoot: Uint8Array; expiryHeight: number; ticker: string; decimals: number; assetInputCount: number; kernelSig: Uint8Array; isReclaim: false }
+  // SPEC §5.12.1 reclaim shape (per_claim = 0 sentinel): reclaim unclaimed remainder.
+  | { opcode: "T_DROP"; payload: Uint8Array; assetId: string; capAmount: bigint; perClaim: 0n; reclaimDropId: string; reclaimSig: Uint8Array; capBlinding: Uint8Array; isReclaim: true }
+  // SPEC §5.13: permissionless claim event against a T_DROP ancestor.
+  | { opcode: "T_DCLAIM"; payload: Uint8Array; assetId: string; dropRevealTxid: string; commitmentC: Uint8Array; amount: bigint; blinding: Uint8Array; witness: Uint8Array }
+  // SPEC §5.7.9: variable-amount atomic settlement (N=2, asset_input_count=1).
+  | { opcode: "T_AXFER_VAR"; payload: Uint8Array; assetId: string; assetInputCount: 1; n: 2; outputs: CommitmentOut[]; rangeproof: Uint8Array; kernelSig: Uint8Array };
 
 export type DecodeResult =
   | { ok: true; envelope: DecodedEnvelope; rawPayload: Uint8Array }
@@ -223,6 +237,15 @@ export function decodePayload(payload: Uint8Array): DecodeResult {
         break;
       case OPCODES.T_WITHDRAW:
         envelope = decodeTWithdraw(payload, c);
+        break;
+      case OPCODES.T_DROP:
+        envelope = decodeTDrop(payload, c);
+        break;
+      case OPCODES.T_DCLAIM:
+        envelope = decodeTDclaim(payload, c);
+        break;
+      case OPCODES.T_AXFER_VAR:
+        envelope = decodeTAxferVar(payload, c);
         break;
       default:
         return { ok: false, reason: `unknown opcode 0x${op.toString(16)}`, rawPayload: payload };
@@ -465,5 +488,142 @@ function decodeTWithdraw(payload: Uint8Array, c: Cursor): DecodedEnvelope {
     rLeaf,
     bindHash,
     proof,
+  };
+}
+
+// SPEC §5.12: T_DROP — public-claim pool over existing supply.
+// Two shapes, discriminated by per_claim: standard (per_claim > 0) and
+// reclaim (per_claim == 0). Standard wire shape:
+//   asset_id(32) || cap_amount(8LE) || per_claim(8LE) || merkle_root(32)
+//     || expiry_height(4LE) || ticker_len(1) || ticker(ticker_len)
+//     || decimals(1) || asset_input_count(1) || kernel_sig(64)
+// Reclaim wire shape:
+//   asset_id(32) || cap_amount(8LE) || per_claim(8LE)=0 || reclaim_drop_id(32)
+//     || reclaim_sig(64) || cap_blinding(32)
+function decodeTDrop(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const assetId = bytesToHex(c.takeBytes(32));
+  const capAmount = c.takeU64LE();
+  if (capAmount <= 0n) throw new Error("T_DROP cap_amount must be > 0");
+  const perClaim = c.takeU64LE();
+  if (perClaim === 0n) {
+    // §5.12.1 reclaim shape
+    const reclaimDropId = bytesToHex(c.takeBytes(32));
+    const reclaimSig = c.takeBytes(64);
+    const capBlinding = c.takeBytes(32);
+    return {
+      opcode: "T_DROP",
+      payload,
+      assetId,
+      capAmount,
+      perClaim: 0n,
+      reclaimDropId,
+      reclaimSig,
+      capBlinding,
+      isReclaim: true,
+    };
+  }
+  // Standard shape
+  if (capAmount % perClaim !== 0n) {
+    throw new Error("T_DROP cap_amount not divisible by per_claim");
+  }
+  const merkleRoot = c.takeBytes(32);
+  const expiryHeight = c.takeU32LE();
+  const tickerLen = c.takeU8();
+  if (tickerLen > 16) throw new Error(`T_DROP bad ticker_len=${tickerLen}`);
+  const ticker = tickerLen > 0 ? c.takeUtf8Strict(tickerLen) : "";
+  const decimals = c.takeU8();
+  if (decimals > 8) throw new Error(`T_DROP bad decimals=${decimals}`);
+  const assetInputCount = c.takeU8();
+  if (assetInputCount < 1 || assetInputCount > 16) {
+    throw new Error(`T_DROP bad asset_input_count=${assetInputCount}`);
+  }
+  const kernelSig = c.takeBytes(64);
+  return {
+    opcode: "T_DROP",
+    payload,
+    assetId,
+    capAmount,
+    perClaim,
+    merkleRoot,
+    expiryHeight,
+    ticker,
+    decimals,
+    assetInputCount,
+    kernelSig,
+    isReclaim: false,
+  };
+}
+
+// SPEC §5.13: T_DCLAIM wire shape:
+//   asset_id(32) || drop_reveal_txid(32) || commitment(33) || amount(8LE)
+//     || blinding(32) || witness_len(2LE) || witness(witness_len)
+function decodeTDclaim(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const assetId = bytesToHex(c.takeBytes(32));
+  const dropRevealTxid = bytesToHex(c.takeBytes(32));
+  const commitmentC = c.takeBytes(33);
+  const amount = c.takeU64LE();
+  if (amount <= 0n) throw new Error("T_DCLAIM amount must be > 0");
+  const blinding = c.takeBytes(32);
+  let allZero = true;
+  for (const b of blinding) {
+    if (b !== 0) {
+      allZero = false;
+      break;
+    }
+  }
+  if (allZero) throw new Error("T_DCLAIM blinding is all zero");
+  const witnessLen = c.takeU16LE();
+  const witness = c.takeBytes(witnessLen);
+  return {
+    opcode: "T_DCLAIM",
+    payload,
+    assetId,
+    dropRevealTxid,
+    commitmentC,
+    amount,
+    blinding,
+    witness,
+  };
+}
+
+// SPEC §5.7.9: T_AXFER_VAR wire shape — N=2, asset_input_count=1 tightened:
+//   asset_id(32) || asset_input_count(1)=0x01 || N(1)=0x02
+//     || [commitment(33) || amount_ct(8)] × 2 || rp_len(2LE)
+//     || rangeproof(rp_len) || kernel_sig(64)
+function decodeTAxferVar(payload: Uint8Array, c: Cursor): DecodedEnvelope {
+  const assetId = bytesToHex(c.takeBytes(32));
+  const assetInputCount = c.takeU8();
+  if (assetInputCount !== 1) {
+    throw new Error(`T_AXFER_VAR asset_input_count must be 1, got ${assetInputCount}`);
+  }
+  const n = c.takeU8();
+  if (n !== 2) {
+    throw new Error(`T_AXFER_VAR N must be 2, got ${n}`);
+  }
+  const outputs: CommitmentOut[] = [];
+  // Per SPEC §5.7.9 the tacit outputs land at vout indices {0, 2}; vout[1]
+  // is the BTC payment. Recording the *envelope's* output ordering here
+  // (i in 0..N-1) preserves the on-wire layout. Indexer-side commitment
+  // table rows are keyed by (txid, vout) where the actual vout is derived
+  // from the tx, not this index — same pattern as CXFER/T_AXFER.
+  for (let i = 0; i < n; i++) {
+    outputs.push({
+      vout: i,
+      commitmentC: c.takeBytes(33),
+      encryptedAmount: c.takeBytes(8),
+    });
+  }
+  const rpLen = c.takeU16LE();
+  const rangeproof = c.takeBytes(rpLen);
+  const kernelSig = c.takeBytes(64);
+  return {
+    opcode: "T_AXFER_VAR",
+    payload,
+    assetId,
+    assetInputCount: 1,
+    n: 2,
+    outputs,
+    rangeproof,
+    kernelSig,
   };
 }

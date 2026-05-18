@@ -85,6 +85,9 @@ export const OPCODE_DESCRIPTIONS: Record<string, string> = {
   T_PMINT: "Permissionless mint — claims a tranche against a T_PETCH (amount public).",
   T_DEPOSIT: "Mixer deposit — anonymizes a UTXO into a per-asset pool.",
   T_WITHDRAW: "Mixer withdrawal — anonymous mint from a pool, gated by zk proof.",
+  T_DROP: "Public-claim pool — locks existing supply for permissionless claims (airdrop).",
+  T_DCLAIM: "Public-claim event — claim against a T_DROP pool.",
+  T_AXFER_VAR: "Variable-amount atomic OTC settlement — taker-chosen amount, BP rangeproof on BTC leg.",
   UNKNOWN: "Malformed or unrecognized envelope.",
   // Asset-kind aliases use the same descriptions (cetch/t_petch are also opcodes).
   cetch: "Confidential etch — issues a new asset with hidden supply.",
