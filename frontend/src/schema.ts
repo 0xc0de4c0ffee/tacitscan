@@ -91,6 +91,7 @@ export const envelopes = pgTable(
     nullifierHash: text("nullifier_hash"),
     status: text("status").notNull().default("ok"),
     decodeError: text("decode_error"),
+    spendingPubkey: text("spending_pubkey"),
     commitmentValid: boolean("commitment_valid"),
     commitmentCheckedAt: timestamp("commitment_checked_at", { withTimezone: true }),
     commitmentInvalidReason: text("commitment_invalid_reason"),
@@ -105,6 +106,7 @@ export const envelopes = pgTable(
     blockHeightIdx: index("envelopes_height_desc_idx").on(t.blockHeight),
     chainStatusIdx: index("envelopes_chain_status_idx").on(t.chainStatus, t.network),
     firstSeenIdx: index("envelopes_first_seen_idx").on(t.firstSeenAt),
+    spendingPubkeyIdx: index("envelopes_spending_pubkey_idx").on(t.network, t.spendingPubkey, t.blockHeight),
   }),
 );
 

@@ -396,6 +396,116 @@ export async function getAssetsWithMintAuthority(network: string, xonlyHex: stri
     .orderBy(desc(schema.assets.etchHeight));
 }
 
+// Activity ledger for a pubkey: every envelope this pubkey created (as
+// asset creator / mint authority) or signed (as the spender, recovered
+// from the witness script's first 32-byte push at index time).
+//
+// SPEC §5 explicitly treats these signatures as publicly attributable —
+// CXFER/T_AXFER/T_BURN/T_DEPOSIT/T_PMINT/T_DCLAIM/T_DROP/T_MINT all reveal
+// the spender's pubkey in the witness on-chain. We're just indexing what
+// the chain already publishes.
+export async function getActivityByPubkey(network: string, xonlyHex: string, limit = 200) {
+  return db.execute<{
+    txid: string;
+    opcode: string;
+    asset_id: string | null;
+    ticker: string | null;
+    role: string; // 'created' | 'mint_authority' | 'signer'
+    block_height: number | null;
+    block_time: Date | null;
+    chain_status: string;
+    first_seen_at: Date;
+    status: string;
+  }>(sql`
+    WITH role_union AS (
+      -- Assets where this pubkey is the creator (CETCH / T_PETCH author)
+      SELECT a.etch_txid AS txid, 'created'::text AS role
+      FROM assets a
+      WHERE a.network = ${network} AND a.creator_pubkey = ${xonlyHex}
+      UNION
+      -- Assets where this pubkey is the mint authority (issuer) — surface
+      -- the CETCH etch tx itself so the timeline shows "this is your
+      -- mintable asset", not just mint events.
+      SELECT a.etch_txid AS txid, 'mint_authority'::text AS role
+      FROM assets a
+      WHERE a.network = ${network} AND a.mint_authority = ${xonlyHex}
+      UNION
+      -- Every envelope signed by this pubkey (spends — CXFER/T_BURN/etc.,
+      -- plus T_MINT issuer-signed which also lands here)
+      SELECT e.txid, 'signer'::text AS role
+      FROM envelopes e
+      WHERE e.network = ${network} AND e.spending_pubkey = ${xonlyHex}
+    )
+    SELECT
+      e.txid,
+      e.opcode,
+      e.asset_id,
+      a.ticker,
+      r.role,
+      e.block_height,
+      e.block_time,
+      e.chain_status,
+      e.first_seen_at,
+      e.status
+    FROM role_union r
+    JOIN envelopes e ON e.txid = r.txid
+    LEFT JOIN assets a ON a.asset_id = e.asset_id
+    WHERE e.chain_status <> 'orphaned'
+    ORDER BY (e.chain_status = 'mempool') DESC, e.block_height DESC NULLS FIRST, e.first_seen_at DESC
+    LIMIT ${limit}
+  `);
+}
+
+// Distinct assets a pubkey has touched (created, issued, or transacted
+// against). One row per asset with an aggregated role label so the Tokens
+// tab can show "creator / issuer / signer" at a glance.
+export async function getTokensByPubkey(network: string, xonlyHex: string) {
+  return db.execute<{
+    asset_id: string;
+    ticker: string;
+    kind: string;
+    image_uri: string | null;
+    resolved_image_url: string | null;
+    etch_height: number;
+    etch_block_time: Date;
+    is_creator: boolean;
+    is_mint_authority: boolean;
+    is_signer: boolean;
+    last_block_height: number | null;
+  }>(sql`
+    WITH touched AS (
+      SELECT a.asset_id, true AS is_creator, false AS is_mint_authority, false AS is_signer, a.etch_height AS h
+      FROM assets a
+      WHERE a.network = ${network} AND a.creator_pubkey = ${xonlyHex}
+      UNION ALL
+      SELECT a.asset_id, false, true, false, a.etch_height
+      FROM assets a
+      WHERE a.network = ${network} AND a.mint_authority = ${xonlyHex}
+      UNION ALL
+      SELECT e.asset_id, false, false, true, e.block_height
+      FROM envelopes e
+      WHERE e.network = ${network} AND e.spending_pubkey = ${xonlyHex} AND e.asset_id IS NOT NULL
+    )
+    SELECT
+      a.asset_id,
+      a.ticker,
+      a.kind,
+      a.image_uri,
+      a.resolved_image_url,
+      a.etch_height,
+      a.etch_block_time,
+      bool_or(t.is_creator) AS is_creator,
+      bool_or(t.is_mint_authority) AS is_mint_authority,
+      bool_or(t.is_signer) AS is_signer,
+      MAX(t.h) AS last_block_height
+    FROM touched t
+    JOIN assets a ON a.asset_id = t.asset_id
+    WHERE a.network = ${network}
+    GROUP BY a.asset_id, a.ticker, a.kind, a.image_uri, a.resolved_image_url, a.etch_height, a.etch_block_time
+    ORDER BY last_block_height DESC NULLS LAST, a.etch_height DESC
+  `);
+}
+
 // Tacit txs the address appeared in (as input prevout or output). NOT a
 // claim of asset ownership — see schema.ts notes on tx_addresses.
 export async function getAddressInteractions(network: string, address: string, limit = 100) {

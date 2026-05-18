@@ -1,10 +1,10 @@
 ---
 import Layout from "../../layouts/Layout.astro";
 import AssetMark from "../../components/AssetMark.astro";
+import AssetThumb from "../../components/AssetThumb.astro";
 import {
-  getAssetsEtchedBy,
-  getAssetsWithMintAuthority,
-  getAddressInteractions,
+  getActivityByPubkey,
+  getTokensByPubkey,
   getDuplicateTickers,
 } from "../../lib/queries";
 import { decodeP2TR, decodeP2WPKH } from "../../lib/bech32";
@@ -15,8 +15,9 @@ import airdropHistory from "../../data/airdrop-history.json";
 const { addr } = Astro.params;
 if (!addr) return Astro.redirect("/");
 
-// Accept both P2TR (bech32m, v1 — used by tacit creators/mint authorities)
-// and P2WPKH (bech32, v0 — used by airdrop recipients).
+// Accept both P2TR (bech32m, v1 — used by tacit creators/mint authorities
+// and any holder's personal identity address) and P2WPKH (bech32, v0 —
+// what the airdrop fulfiller paid recipients to).
 const taproot = decodeP2TR(addr);
 const wpkh = taproot ? null : decodeP2WPKH(addr);
 const decoded = taproot ?? wpkh;
@@ -41,28 +42,26 @@ if (decoded.hrp !== networkExpected) {
 const isTaproot = !!taproot;
 const xonly = taproot?.xonlyPubkeyHex ?? null;
 
-const [etched, mintAuthorityOf, interactions, stats, utxos, duplicates] = await Promise.all([
-  xonly ? getAssetsEtchedBy(network, xonly) : Promise.resolve([] as Awaited<ReturnType<typeof getAssetsEtchedBy>>),
-  xonly ? getAssetsWithMintAuthority(network, xonly) : Promise.resolve([] as Awaited<ReturnType<typeof getAssetsWithMintAuthority>>),
-  getAddressInteractions(network, addr, 100),
+// Tab selection from ?tab= query param. SSR sets initial visibility so
+// there's no flash; client-side JS just swaps state without reload.
+type Tab = "activity" | "tokens";
+const requestedTab = Astro.url.searchParams.get("tab");
+const initialTab: Tab = requestedTab === "tokens" ? "tokens" : "activity";
+
+const [activity, tokens, stats, utxos, duplicates] = await Promise.all([
+  xonly
+    ? getActivityByPubkey(network, xonly, 200)
+    : Promise.resolve([] as Awaited<ReturnType<typeof getActivityByPubkey>>),
+  xonly
+    ? getTokensByPubkey(network, xonly)
+    : Promise.resolve([] as Awaited<ReturnType<typeof getTokensByPubkey>>),
   fetchAddressStats(addr),
   fetchAddressUtxos(addr),
   getDuplicateTickers(network),
 ]);
 
 const balanceSats = stats ? stats.funded - stats.spent : null;
-
-// Etched assets and assets-with-this-address-as-mint-authority can
-// overlap (the etcher often is the mint authority too). De-dupe for
-// the "tokens" view so we don't double-list.
-const allAssetIds = new Set<string>();
-for (const a of etched) allAssetIds.add(a.assetId);
-for (const a of mintAuthorityOf) {
-  if (!allAssetIds.has(a.assetId)) {
-    etched.push(a); // mutating; this is a render-time helper, fine.
-    allAssetIds.add(a.assetId);
-  }
-}
+const hasTacitActivity = activity.length > 0 || tokens.length > 0;
 
 // For bc1q addresses: surface any airdrop payout we made to this
 // address. The history JSON is bundled at build time; one linear scan
@@ -95,8 +94,14 @@ const addrKindDetail = isTaproot
 
 const title = `Address ${shortHex(addr, 10, 6)} · tacitscan`;
 const description = isTaproot
-  ? `Bitcoin Taproot address ${addr}. Sats balance${balanceSats != null ? ` ${balanceSats.toLocaleString()} sats` : ""}, ${etched.length} associated tacit asset${etched.length === 1 ? "" : "s"}, ${interactions.length} tacit tx interaction${interactions.length === 1 ? "" : "s"}.`
-  : `Bitcoin SegWit address ${addr}. Sats balance${balanceSats != null ? ` ${balanceSats.toLocaleString()} sats` : ""}${airdropPayout ? `, received a tacit airdrop payout (leaf #${airdropPayout.leafIndex})` : ""}.`;
+  ? `Bitcoin Taproot address ${addr}. ${tokens.length} tacit asset${tokens.length === 1 ? "" : "s"} touched, ${activity.length} envelope${activity.length === 1 ? "" : "s"} authored or signed.${balanceSats != null ? ` Balance ${balanceSats.toLocaleString()} sats.` : ""}`
+  : `Bitcoin SegWit address ${addr}.${balanceSats != null ? ` Balance ${balanceSats.toLocaleString()} sats.` : ""}${airdropPayout ? ` Received a tacit airdrop payout (leaf #${airdropPayout.leafIndex}).` : ""}`;
+
+const ROLE_LABEL: Record<string, string> = {
+  created: "creator",
+  mint_authority: "mint authority",
+  signer: "signer",
+};
 ---
 
 <Layout title={title} description={description}>
@@ -140,105 +145,192 @@ const description = isTaproot
     )}
   </dl>
 
-  {isTaproot && (
+  {isTaproot && hasTacitActivity && (
     <>
-      <h2>Tacit assets <span class="muted" style="font-size:13px">({etched.length})</span></h2>
-      <p class="muted" style="margin-top:0;font-size:13px">
-        Assets where this address is the <strong>creator</strong> or <strong>mint authority</strong>. Token balances are
-        confidential by Tacit's design (Pedersen commitments) and cannot be shown.
-      </p>
+      <nav class="addr-tabs" role="tablist" aria-label="Address sections">
+        <a
+          href={`/address/${addr}?tab=activity`}
+          role="tab"
+          aria-selected={initialTab === "activity" ? "true" : "false"}
+          class={initialTab === "activity" ? "addr-tab addr-tab-active" : "addr-tab"}
+          data-tab="activity"
+        >Activity <span class="muted">({activity.length})</span></a>
+        <a
+          href={`/address/${addr}?tab=tokens`}
+          role="tab"
+          aria-selected={initialTab === "tokens" ? "true" : "false"}
+          class={initialTab === "tokens" ? "addr-tab addr-tab-active" : "addr-tab"}
+          data-tab="tokens"
+        >Tokens <span class="muted">({tokens.length})</span></a>
+      </nav>
+
+      <section data-tab-panel="activity" hidden={initialTab !== "activity"}>
+        <p class="muted" style="margin-top:8px;font-size:13px;max-width:760px">
+          Every envelope this pubkey created or signed, in reverse-chronological order.
+          Amounts are hidden by Pedersen commitments; only public-amount opcodes (T_BURN, T_PMINT) reveal them.
+        </p>
+        {activity.length === 0 ? (
+          <p class="muted">No envelope activity for this pubkey.</p>
+        ) : (
+          <div class="card" style="padding:0">
+            <table class="list">
+              <thead>
+                <tr>
+                  <th style="width:90px">opcode</th>
+                  <th>txid</th>
+                  <th style="width:140px">asset</th>
+                  <th style="width:110px">role</th>
+                  <th style="width:110px">when</th>
+                </tr>
+              </thead>
+              <tbody>
+                {activity.map((r) => {
+                  const isMempool = r.chain_status === "mempool";
+                  const isMalformed = r.status !== "ok";
+                  const label = r.ticker && r.asset_id
+                    ? displayAssetName(r.ticker, r.asset_id, duplicates.has(r.ticker))
+                    : null;
+                  return (
+                    <tr>
+                      <td>
+                        <span class={`pill ${r.opcode.toLowerCase()}`} data-tip={describeBadge(r.opcode)}>{r.opcode}</span>
+                        {isMalformed && <span class="muted" style="font-size:10px;margin-left:6px">malformed</span>}
+                      </td>
+                      <td class="mono"><a href={`/tx/${r.txid}`}>{shortHex(r.txid, 14, 6)}</a></td>
+                      <td>
+                        {label ? (
+                          <a href={`/assets/${r.asset_id}`}>{label}</a>
+                        ) : (
+                          <span class="muted">—</span>
+                        )}
+                      </td>
+                      <td class="muted">{ROLE_LABEL[r.role] ?? r.role}</td>
+                      <td class="muted">
+                        {isMempool ? (
+                          <span class="conf-badge conf-mempool" style="font-size:11px">pending</span>
+                        ) : (
+                          r.block_time ? relativeTime(r.block_time) : ""
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section data-tab-panel="tokens" hidden={initialTab !== "tokens"}>
+        <p class="muted" style="margin-top:8px;font-size:13px;max-width:760px">
+          Distinct assets this pubkey has touched. Per-asset balances are confidential by design — Pedersen commitments hide amounts on every CXFER/T_AXFER. This list shows participation, not holdings.
+        </p>
+        {tokens.length === 0 ? (
+          <p class="muted">No tacit assets touched by this pubkey.</p>
+        ) : (
+          <div class="card" style="padding:0">
+            <table class="list">
+              <thead>
+                <tr>
+                  <th style="width:200px">ticker</th>
+                  <th>asset_id</th>
+                  <th style="width:90px">kind</th>
+                  <th>roles</th>
+                  <th style="width:110px">last seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tokens.map((t) => {
+                  const label = displayAssetName(t.ticker, t.asset_id, duplicates.has(t.ticker));
+                  const roleChips: string[] = [];
+                  if (t.is_creator) roleChips.push("creator");
+                  if (t.is_mint_authority) roleChips.push("issuer");
+                  if (t.is_signer) roleChips.push("signer");
+                  return (
+                    <tr>
+                      <td>
+                        <a href={`/assets/${t.asset_id}`} style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:inherit;">
+                          <AssetThumb
+                            imageUri={t.image_uri}
+                            resolvedImageUrl={t.resolved_image_url}
+                            assetId={t.asset_id}
+                            ticker={t.ticker}
+                            size={28}
+                          />
+                          <strong>{label}</strong>
+                        </a>
+                      </td>
+                      <td class="mono"><a href={`/assets/${t.asset_id}`}>{shortHex(t.asset_id, 10, 6)}</a></td>
+                      <td><span class={`pill ${t.kind}`} data-tip={describeBadge(t.kind)}>{t.kind}</span></td>
+                      <td>
+                        {roleChips.map((c, idx) => (
+                          <>
+                            {idx > 0 && <span class="muted">, </span>}
+                            <span class="muted">{c}</span>
+                          </>
+                        ))}
+                      </td>
+                      <td class="muted">{t.last_block_height ?? "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <script is:inline>
+        // Tab switch without page reload. Updates ?tab= via replaceState
+        // so refresh/bookmark land on the same tab.
+        document.querySelectorAll('.addr-tab').forEach((el) => {
+          el.addEventListener('click', (e) => {
+            e.preventDefault();
+            const target = el.getAttribute('data-tab');
+            if (!target) return;
+            document.querySelectorAll('.addr-tab').forEach((t) => {
+              const isActive = t.getAttribute('data-tab') === target;
+              t.classList.toggle('addr-tab-active', isActive);
+              t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
+            document.querySelectorAll('[data-tab-panel]').forEach((p) => {
+              p.hidden = p.getAttribute('data-tab-panel') !== target;
+            });
+            const url = new URL(window.location.href);
+            url.searchParams.set('tab', target);
+            window.history.replaceState(null, '', url.toString());
+          });
+        });
+      </script>
     </>
   )}
-  {isTaproot && (etched.length === 0 ? (
-    <p class="muted">No tacit assets associated with this address.</p>
-  ) : (
-    <div class="card" style="padding:0">
-      <table class="list">
-        <thead>
-          <tr>
-            <th style="width:160px">ticker</th>
-            <th>asset_id</th>
-            <th style="width:80px">kind</th>
-            <th style="width:110px">role</th>
-            <th style="width:100px">etched</th>
-          </tr>
-        </thead>
-        <tbody>
-          {etched.map((a) => {
-            const role = a.creatorPubkey === xonly ? "creator" : "mint authority";
-            const label = displayAssetName(a.ticker, a.assetId, duplicates.has(a.ticker));
-            return (
-              <tr>
-                <td>
-                  <a href={`/assets/${a.assetId}`} style="display:inline-flex;align-items:center;gap:6px">
-                    <strong>{label}</strong>
-                    <AssetMark assetId={a.assetId} size={12} />
-                  </a>
-                </td>
-                <td class="mono"><a href={`/assets/${a.assetId}`}>{shortHex(a.assetId, 10, 6)}</a></td>
-                <td><span class={`pill ${a.kind}`} data-tip={describeBadge(a.kind)}>{a.kind}</span></td>
-                <td class="muted">{role}</td>
-                <td class="mono">{a.etchHeight}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  ))}
-
-  <h2>Tacit interactions <span class="muted" style="font-size:13px">({interactions.length})</span></h2>
-  <p class="muted" style="margin-top:0;font-size:13px">
-    Tacit transactions where this address appears on the Bitcoin side (paying the fee, receiving change, etc.).
-    <strong>This is NOT a list of tacit transfers this address sent or received</strong> — tacit asset ownership is
-    confidential and uses a NUMS-Hash internal pubkey, so the addresses on a CXFER/T_AXFER's vin/vout are unrelated to
-    the asset holder.
-  </p>
-  {interactions.length === 0 ? (
-    <p class="muted">No tacit txs touch this address.</p>
-  ) : (
-    <div class="card" style="padding:0">
-      <table class="list">
-        <thead>
-          <tr>
-            <th style="width:90px">opcode</th>
-            <th>txid</th>
-            <th style="width:130px">asset</th>
-            <th style="width:80px">role</th>
-            <th style="width:110px">when</th>
-          </tr>
-        </thead>
-        <tbody>
-          {interactions.map((r) => {
-            const isMempool = r.chain_status === "mempool";
-            const label =
-              r.ticker && r.asset_id
-                ? displayAssetName(r.ticker, r.asset_id, duplicates.has(r.ticker))
-                : null;
-            return (
-              <tr>
-                <td><span class={`pill ${r.opcode.toLowerCase()}`}>{r.opcode}</span></td>
-                <td class="mono"><a href={`/tx/${r.txid}`}>{shortHex(r.txid, 14, 6)}</a></td>
-                <td>
-                  {label ? (
-                    <a href={`/assets/${r.asset_id}`}>{label}</a>
-                  ) : (
-                    <span class="muted">—</span>
-                  )}
-                </td>
-                <td class="muted">{r.role}</td>
-                <td class="muted">
-                  {isMempool ? (
-                    <span class="conf-badge conf-mempool" style="font-size:11px">pending</span>
-                  ) : (
-                    r.block_time ? relativeTime(r.block_time) : ""
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  )}
 </Layout>
+
+<style>
+  .addr-tabs {
+    display: flex;
+    gap: 4px;
+    margin-top: 28px;
+    border-bottom: 1px solid var(--ink-faint, #ddd);
+  }
+  .addr-tab {
+    padding: 8px 16px;
+    font-size: 13px;
+    color: var(--text-muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .addr-tab:hover {
+    color: var(--ink, #111);
+  }
+  .addr-tab-active {
+    color: var(--ink, #111);
+    border-bottom-color: var(--ink, #111);
+    font-weight: 500;
+  }
+  .addr-tab-active .muted {
+    color: var(--text-muted);
+  }
+</style>

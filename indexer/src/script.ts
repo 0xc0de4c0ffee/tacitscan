@@ -79,6 +79,33 @@ export function decodeScript(script: Uint8Array): ScriptOp[] {
   return ops;
 }
 
+// Extract the spending pubkey from a Tacit envelope-bearing leaf script.
+// Canonical shape is `<32-byte pubkey> OP_CHECKSIG OP_FALSE OP_IF ...`, so
+// the spender is the first 32-byte push that precedes an OP_CHECKSIG. The
+// pubkey is the on-chain witness signer — same key the OP_CHECKSIG verifies
+// against. Returns the 64-hex pubkey, or null if the script doesn't match
+// the canonical shape (very old or shape-malformed witnesses).
+const OP_CHECKSIG = 0xac;
+
+export function extractSpendingPubkey(script: Uint8Array): string | null {
+  let ops;
+  try {
+    ops = decodeScript(script);
+  } catch {
+    return null;
+  }
+  for (let i = 0; i < ops.length - 1; i++) {
+    const a = ops[i]!;
+    const b = ops[i + 1]!;
+    if (a.kind === "push" && a.data.length === 32 && b.kind === "op" && b.opcode === OP_CHECKSIG) {
+      let hex = "";
+      for (const byte of a.data) hex += byte.toString(16).padStart(2, "0");
+      return hex;
+    }
+  }
+  return null;
+}
+
 // Extract the inner pushes between `OP_FALSE OP_IF ... OP_ENDIF`.
 // Returns null if no such frame exists in the script. We track IF/ENDIF
 // depth so a nested OP_IF inside the envelope (none in Tacit, but

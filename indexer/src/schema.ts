@@ -112,6 +112,12 @@ export const envelopes = pgTable(
     status: text("status").notNull().default("ok"),
     decodeError: text("decode_error"),
 
+    // x-only pubkey that signed the envelope-bearing input (vin[0]).
+    // Extracted from the witness script's first 32-byte push. Powers the
+    // address page's per-pubkey activity view. Nullable: very old or
+    // shape-malformed witnesses may not have a recoverable spender.
+    spendingPubkey: text("spending_pubkey"),
+
     // Cryptographic validation result, populated by the validator loop
     // for T_PMINT envelopes. null until checked, true/false after.
     commitmentValid: boolean("commitment_valid"),
@@ -130,6 +136,7 @@ export const envelopes = pgTable(
     blockHeightIdx: index("envelopes_height_desc_idx").on(t.blockHeight),
     chainStatusIdx: index("envelopes_chain_status_idx").on(t.chainStatus, t.network),
     firstSeenIdx: index("envelopes_first_seen_idx").on(t.firstSeenAt),
+    spendingPubkeyIdx: index("envelopes_spending_pubkey_idx").on(t.network, t.spendingPubkey, t.blockHeight),
   }),
 );
 

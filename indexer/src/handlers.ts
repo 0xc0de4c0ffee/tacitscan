@@ -9,6 +9,7 @@ import {
   type DecodedEnvelope,
   type DecodeResult,
 } from "./envelope.js";
+import { extractSpendingPubkey } from "./script.js";
 import type { EsploraTx } from "./esplora.js";
 
 export interface BlockCtx {
@@ -48,6 +49,12 @@ export async function persistEnvelope(
   result: DecodeResult,
   rawWitness: Uint8Array,
 ): Promise<void> {
+  // SPEC §5: every Tacit envelope-bearing input has the canonical leaf-script
+  // shape `<32B pubkey> OP_CHECKSIG OP_FALSE OP_IF ...`. The pubkey is the
+  // holder's tacit_pubkey — what verifies the spend. We surface this in the
+  // address-page Activity tab. Null for shape-malformed witnesses.
+  const spendingPubkey = extractSpendingPubkey(rawWitness);
+
   // Malformed / unknown envelope — record minimal row so the explorer can
   // still surface the tx.
   if (!result.ok) {
@@ -68,6 +75,7 @@ export async function persistEnvelope(
         rawPayload: result.rawPayload ?? new Uint8Array(0),
         status: "malformed",
         decodeError: result.reason,
+        spendingPubkey,
       })
       .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
     return;
@@ -88,6 +96,7 @@ export async function persistEnvelope(
     rawWitness,
     rawPayload: result.rawPayload,
     status: "ok",
+    spendingPubkey,
   } as const;
 
   switch (env.opcode) {
