@@ -7,18 +7,23 @@ import {
   getAddressInteractions,
   getDuplicateTickers,
 } from "../../lib/queries";
-import { decodeP2TR } from "../../lib/bech32";
+import { decodeP2TR, decodeP2WPKH } from "../../lib/bech32";
 import { fetchAddressStats, fetchAddressUtxos } from "../../lib/esplora";
 import { relativeTime, shortHex, displayAssetName, describeBadge } from "../../lib/format";
+import airdropHistory from "../../data/airdrop-history.json";
 
 const { addr } = Astro.params;
 if (!addr) return Astro.redirect("/");
 
-const decoded = decodeP2TR(addr);
+// Accept both P2TR (bech32m, v1 — used by tacit creators/mint authorities)
+// and P2WPKH (bech32, v0 — used by airdrop recipients).
+const taproot = decodeP2TR(addr);
+const wpkh = taproot ? null : decodeP2WPKH(addr);
+const decoded = taproot ?? wpkh;
 if (!decoded) {
   Astro.response.status = 400;
   return new Response(
-    `Not a valid bech32m P2TR address. tacitscan only supports Taproot (bc1p…/tb1p…) addresses — that's the address format used by Tacit creators and mint authorities.`,
+    `Not a valid bech32 address. tacitscan supports Taproot (bc1p…/tb1p…) and SegWit v0 P2WPKH (bc1q…/tb1q…) addresses.`,
     { status: 400 },
   );
 }
@@ -33,10 +38,12 @@ if (decoded.hrp !== networkExpected) {
   );
 }
 
-const xonly = decoded.xonlyPubkeyHex;
+const isTaproot = !!taproot;
+const xonly = taproot?.xonlyPubkeyHex ?? null;
+
 const [etched, mintAuthorityOf, interactions, stats, utxos, duplicates] = await Promise.all([
-  getAssetsEtchedBy(network, xonly),
-  getAssetsWithMintAuthority(network, xonly),
+  xonly ? getAssetsEtchedBy(network, xonly) : Promise.resolve([] as Awaited<ReturnType<typeof getAssetsEtchedBy>>),
+  xonly ? getAssetsWithMintAuthority(network, xonly) : Promise.resolve([] as Awaited<ReturnType<typeof getAssetsWithMintAuthority>>),
   getAddressInteractions(network, addr, 100),
   fetchAddressStats(addr),
   fetchAddressUtxos(addr),
@@ -57,14 +64,59 @@ for (const a of mintAuthorityOf) {
   }
 }
 
+// For bc1q addresses: surface any airdrop payout we made to this
+// address. The history JSON is bundled at build time; one linear scan
+// per render is fine (~1.5k recipients).
+type AirdropPayout = {
+  leafIndex: number;
+  revealTxid: string;
+  broadcastAt: number;
+};
+let airdropPayout: AirdropPayout | null = null;
+if (!isTaproot) {
+  outer: for (const b of airdropHistory.batches) {
+    for (const r of b.recipients) {
+      if (r.a === addr) {
+        airdropPayout = {
+          leafIndex: r.i,
+          revealTxid: b.reveal,
+          broadcastAt: b.t,
+        };
+        break outer;
+      }
+    }
+  }
+}
+
+const addrKindLabel = isTaproot ? "P2TR" : "P2WPKH";
+const addrKindDetail = isTaproot
+  ? `x-only pubkey ${shortHex(xonly!, 10, 6)}`
+  : `hash160 ${shortHex(wpkh!.hash160Hex, 10, 6)}`;
+
 const title = `Address ${shortHex(addr, 10, 6)} · tacitscan`;
-const description = `Bitcoin Taproot address ${addr}. Sats balance${balanceSats != null ? ` ${balanceSats.toLocaleString()} sats` : ""}, ${etched.length} associated tacit asset${etched.length === 1 ? "" : "s"}, ${interactions.length} tacit tx interaction${interactions.length === 1 ? "" : "s"}.`;
+const description = isTaproot
+  ? `Bitcoin Taproot address ${addr}. Sats balance${balanceSats != null ? ` ${balanceSats.toLocaleString()} sats` : ""}, ${etched.length} associated tacit asset${etched.length === 1 ? "" : "s"}, ${interactions.length} tacit tx interaction${interactions.length === 1 ? "" : "s"}.`
+  : `Bitcoin SegWit address ${addr}. Sats balance${balanceSats != null ? ` ${balanceSats.toLocaleString()} sats` : ""}${airdropPayout ? `, received a tacit airdrop payout (leaf #${airdropPayout.leafIndex})` : ""}.`;
 ---
 
 <Layout title={title} description={description}>
   <h1 style="margin-bottom:4px">Address</h1>
   <div class="mono" style="word-break:break-all;font-size:13px">{addr}</div>
-  <div class="muted" style="font-size:12px;margin-top:4px">P2TR · x-only pubkey {shortHex(xonly, 10, 6)}</div>
+  <div class="muted" style="font-size:12px;margin-top:4px">{addrKindLabel} · {addrKindDetail}</div>
+
+  {airdropPayout && (
+    <>
+      <h2>Tacit airdrop payout</h2>
+      <dl class="kv">
+        <dt>leaf</dt>
+        <dd class="mono">#{airdropPayout.leafIndex}</dd>
+        <dt>reveal tx</dt>
+        <dd class="mono"><a href={`/tx/${airdropPayout.revealTxid}`}>{shortHex(airdropPayout.revealTxid, 14, 6)}</a></dd>
+        <dt>broadcast</dt>
+        <dd class="muted">{relativeTime(new Date(airdropPayout.broadcastAt * 1000))}</dd>
+      </dl>
+    </>
+  )}
 
   <h2>Bitcoin</h2>
   <dl class="kv">
@@ -88,12 +140,16 @@ const description = `Bitcoin Taproot address ${addr}. Sats balance${balanceSats 
     )}
   </dl>
 
-  <h2>Tacit assets <span class="muted" style="font-size:13px">({etched.length})</span></h2>
-  <p class="muted" style="margin-top:0;font-size:13px">
-    Assets where this address is the <strong>creator</strong> or <strong>mint authority</strong>. Token balances are
-    confidential by Tacit's design (Pedersen commitments) and cannot be shown.
-  </p>
-  {etched.length === 0 ? (
+  {isTaproot && (
+    <>
+      <h2>Tacit assets <span class="muted" style="font-size:13px">({etched.length})</span></h2>
+      <p class="muted" style="margin-top:0;font-size:13px">
+        Assets where this address is the <strong>creator</strong> or <strong>mint authority</strong>. Token balances are
+        confidential by Tacit's design (Pedersen commitments) and cannot be shown.
+      </p>
+    </>
+  )}
+  {isTaproot && (etched.length === 0 ? (
     <p class="muted">No tacit assets associated with this address.</p>
   ) : (
     <div class="card" style="padding:0">
@@ -129,7 +185,7 @@ const description = `Bitcoin Taproot address ${addr}. Sats balance${balanceSats 
         </tbody>
       </table>
     </div>
-  )}
+  ))}
 
   <h2>Tacit interactions <span class="muted" style="font-size:13px">({interactions.length})</span></h2>
   <p class="muted" style="margin-top:0;font-size:13px">

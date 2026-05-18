@@ -41,8 +41,8 @@ function hrpExpand(hrp: string): number[] {
   return out;
 }
 
-function verifyChecksum(hrp: string, data: number[]): boolean {
-  return polymod([...hrpExpand(hrp), ...data]) === BECH32M_CONST;
+function verifyChecksum(hrp: string, data: number[], constant: number): boolean {
+  return polymod([...hrpExpand(hrp), ...data]) === constant;
 }
 
 function convertBits(data: number[], from: number, to: number, pad: boolean): number[] | null {
@@ -72,6 +72,12 @@ export interface DecodedP2TR {
   hrp: "bc" | "tb";
   /** 32-byte x-only output key, hex-encoded (64 chars). */
   xonlyPubkeyHex: string;
+}
+
+export interface DecodedP2WPKH {
+  hrp: "bc" | "tb";
+  /** 20-byte hash160 program, hex-encoded (40 chars). */
+  hash160Hex: string;
 }
 
 function createChecksum(hrp: string, data: number[]): number[] {
@@ -149,7 +155,7 @@ export function decodeP2TR(addr: string): DecodedP2TR | null {
     if (v === undefined) return null;
     data.push(v);
   }
-  if (!verifyChecksum(hrp, data)) return null;
+  if (!verifyChecksum(hrp, data, BECH32M_CONST)) return null;
   // Strip 6-char checksum, leaving [witver, ...program5bit].
   const payload = data.slice(0, -6);
   if (payload.length === 0) return null;
@@ -159,4 +165,32 @@ export function decodeP2TR(addr: string): DecodedP2TR | null {
   if (!program || program.length !== 32) return null;
   const hex = program.map((b) => b.toString(16).padStart(2, "0")).join("");
   return { hrp: hrp as "bc" | "tb", xonlyPubkeyHex: hex };
+}
+
+// Decode a bech32 segwit-v0 P2WPKH address ("bc1q…"/"tb1q…"). v0 uses the
+// original bech32 checksum constant (1), not bech32m. Returns null for
+// anything that isn't valid v0 P2WPKH (20-byte program).
+export function decodeP2WPKH(addr: string): DecodedP2WPKH | null {
+  const a = addr.toLowerCase();
+  if (addr !== a && addr !== addr.toUpperCase()) return null;
+  const sep = a.lastIndexOf("1");
+  if (sep < 1 || sep + 7 > a.length || a.length > 90) return null;
+  const hrp = a.slice(0, sep);
+  if (hrp !== "bc" && hrp !== "tb") return null;
+  const dataPart = a.slice(sep + 1);
+  const data: number[] = [];
+  for (let i = 0; i < dataPart.length; i++) {
+    const v = CHARSET_REV[dataPart[i]!];
+    if (v === undefined) return null;
+    data.push(v);
+  }
+  if (!verifyChecksum(hrp, data, BECH32_CONST)) return null;
+  const payload = data.slice(0, -6);
+  if (payload.length === 0) return null;
+  const witver = payload[0]!;
+  if (witver !== 0) return null;
+  const program = convertBits(payload.slice(1), 5, 8, false);
+  if (!program || program.length !== 20) return null;
+  const hex = program.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return { hrp: hrp as "bc" | "tb", hash160Hex: hex };
 }

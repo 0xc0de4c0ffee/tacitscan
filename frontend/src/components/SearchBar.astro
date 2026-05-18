@@ -5,7 +5,7 @@
 <div class="searchbar">
   <input
     type="text"
-    placeholder="Search txid, asset_id, or ticker…"
+    placeholder="Search txid, asset_id, ticker, or bc1… address"
     autocomplete="off"
     spellcheck="false"
     id="searchInput"
@@ -25,6 +25,14 @@
     );
   }
 
+  // Recognize bech32/bech32m segwit addresses (mainnet bc1…, signet/testnet
+  // tb1…). Don't fully validate the checksum here — the /address page does
+  // that and 400s on bad input. We just route plausible-looking addresses
+  // to the address page instead of the search API.
+  function looksLikeBech32Address(q: string): boolean {
+    return /^(bc|tb)1[02-9ac-hj-np-z]{6,87}$/i.test(q);
+  }
+
   async function run(q: string): Promise<void> {
     if (!q) {
       results.classList.remove("open");
@@ -33,6 +41,17 @@
     }
     if (q === lastQ) return;
     lastQ = q;
+
+    if (looksLikeBech32Address(q)) {
+      const safe = escape(q);
+      const short = q.length > 24 ? `${q.slice(0, 12)}…${q.slice(-8)}` : q;
+      results.innerHTML =
+        `<div class="group">address</div>` +
+        `<a href="/address/${encodeURIComponent(q)}"><strong>${escape(short)}</strong> <span class="muted">bitcoin address</span></a>`;
+      results.classList.add("open");
+      return;
+    }
+
     try {
       const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
       if (!r.ok) return;
@@ -70,6 +89,10 @@
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       const q = input.value.trim();
+      if (looksLikeBech32Address(q)) {
+        window.location.href = `/address/${encodeURIComponent(q)}`;
+        return;
+      }
       if (/^[0-9a-f]{64}$/i.test(q)) {
         // Looks like a full txid or asset_id. Try asset first; if not found,
         // tx page will 404 itself. We'll heuristically check length only.
