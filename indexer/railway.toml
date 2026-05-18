@@ -1,0 +1,17 @@
+# Railway service config for the tacitscan indexer.
+# Picked up automatically when the service's Root Directory is set to `indexer`.
+# Everything else (env vars, region, attached Postgres) is configured in the UI.
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "pnpm install --frozen-lockfile && pnpm build"
+
+[deploy]
+# pnpm start runs migrations then launches the block walker.
+startCommand = "pnpm start"
+# A crashed indexer should retry — usually it's a transient Esplora hiccup.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+# Single instance — the cursor table is the source of truth and is not safe
+# to write to from multiple workers.
+numReplicas = 1

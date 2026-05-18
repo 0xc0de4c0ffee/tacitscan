@@ -1,0 +1,147 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import AssetThumb from "../../components/AssetThumb.astro";
+import AssetMark from "../../components/AssetMark.astro";
+import { getAssetsDirectory, getAssetsCount, getDuplicateTickers } from "../../lib/queries";
+import { shortHex, formatAmount, relativeTime, describeBadge, displayAssetName } from "../../lib/format";
+
+const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
+
+const q = Astro.url.searchParams.get("q") ?? "";
+const page = Math.max(0, Number(Astro.url.searchParams.get("p") ?? 0));
+const PAGE = 50;
+
+const [rows, total, duplicates] = await Promise.all([
+  getAssetsDirectory({ limit: PAGE, offset: page * PAGE, q }),
+  getAssetsCount(q),
+  getDuplicateTickers(network),
+]);
+const visible = rows;
+const totalPages = Math.max(1, Math.ceil(total / PAGE));
+const currentPage = Math.min(page, totalPages - 1);
+
+function buildPageList(current: number, totalP: number, window = 2): (number | "…")[] {
+  if (totalP <= 7) return Array.from({ length: totalP }, (_, i) => i);
+  const set = new Set<number>([0, totalP - 1, current]);
+  for (let d = 1; d <= window; d++) {
+    if (current - d >= 0) set.add(current - d);
+    if (current + d <= totalP - 1) set.add(current + d);
+  }
+  const sorted = [...set].sort((a, b) => a - b);
+  const out: (number | "…")[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i]! - sorted[i - 1]! > 1) out.push("…");
+    out.push(sorted[i]!);
+  }
+  return out;
+}
+const pages = buildPageList(currentPage, totalPages);
+const baseQ = q ? `&q=${encodeURIComponent(q)}` : "";
+---
+
+<Layout title="assets · tacitscan">
+  <h1>Assets</h1>
+  <p class="muted">All CETCH and T_PETCH assets observed on chain, newest first.</p>
+
+  <form method="get" style="margin: 14px 0;">
+    <input
+      name="q"
+      type="text"
+      value={q}
+      placeholder="filter by ticker…"
+      class="mono"
+      style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;font-family:var(--mono);font-size:13px;width:320px"
+    />
+  </form>
+
+  <div class="card" style="padding:0">
+    <table class="list">
+      <thead>
+        <tr>
+          <th>ticker</th>
+          <th style="width:80px">kind</th>
+          <th class="hide-mobile" style="width:80px;text-align:right">decimals</th>
+          <th class="hide-mobile">asset_id</th>
+          <th class="hide-mobile" style="width:140px;text-align:right">cap</th>
+          <th style="width:80px;text-align:right">block</th>
+          <th style="width:90px">when</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          visible.length === 0 ? (
+            <tr>
+              <td colspan="7" class="muted" style="text-align:center;padding:30px">
+                no assets yet
+              </td>
+            </tr>
+          ) : (
+            visible.map((a) => (
+              <tr>
+                <td>
+                  <a href={`/assets/${a.assetId}`} style="display:inline-flex;align-items:center;gap:10px">
+                    <AssetThumb
+                      imageUri={a.imageUri}
+                      resolvedImageUrl={a.resolvedImageUrl}
+                      assetId={a.assetId}
+                      ticker={a.ticker}
+                      size={26}
+                    />
+                    <span style="display:inline-flex;align-items:center">
+                      <strong>{a.ticker}</strong>
+                      <AssetMark assetId={a.assetId} size={14} />
+                      {duplicates.has(a.ticker) && (
+                        <span class="muted mono" style="font-size:11px;margin-left:4px">
+                          #{a.assetId.slice(0, 8)}
+                        </span>
+                      )}
+                    </span>
+                  </a>
+                </td>
+                <td>
+                  <span class={`pill ${a.kind}`} data-tip={describeBadge(a.kind)}>{a.kind}</span>
+                </td>
+                <td class="mono hide-mobile" style="text-align:right">{a.decimals}</td>
+                <td class="mono muted hide-mobile">{shortHex(a.assetId, 10, 6)}</td>
+                <td class="mono hide-mobile" style="text-align:right">
+                  {a.kind === "t_petch" && a.capAmount
+                    ? formatAmount(a.capAmount, a.decimals)
+                    : "—"}
+                </td>
+                <td class="mono" style="text-align:right">{a.etchHeight}</td>
+                <td class="muted">{relativeTime(a.etchBlockTime)}</td>
+              </tr>
+            ))
+          )
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <nav class="pagination" aria-label="assets pagination">
+    <span class="page-info">
+      {total === 0 ? "0 of 0" : `${page * PAGE + 1}–${Math.min((page + 1) * PAGE, total)} of ${total}`}
+    </span>
+    <span class="pages">
+      {currentPage > 0 ? (
+        <a href={`/assets?p=${currentPage - 1}${baseQ}`} class="page-btn" rel="prev">‹</a>
+      ) : (
+        <span class="page-btn disabled">‹</span>
+      )}
+      {pages.map((p) =>
+        p === "…" ? (
+          <span class="page-ellipsis">…</span>
+        ) : p === currentPage ? (
+          <span class="page-btn active">{p + 1}</span>
+        ) : (
+          <a href={`/assets?p=${p}${baseQ}`} class="page-btn">{p + 1}</a>
+        )
+      )}
+      {currentPage < totalPages - 1 ? (
+        <a href={`/assets?p=${currentPage + 1}${baseQ}`} class="page-btn" rel="next">›</a>
+      ) : (
+        <span class="page-btn disabled">›</span>
+      )}
+    </span>
+  </nav>
+</Layout>

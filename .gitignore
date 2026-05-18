@@ -1,0 +1,11 @@
+node_modules
+.env
+.env.local
+.env.*.local
+dist
+build
+.astro
+.vercel
+.turbo
+*.log
+.DS_Store

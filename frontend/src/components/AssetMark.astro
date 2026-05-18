@@ -1,0 +1,27 @@
+---
+// Small inline identicon badge derived from the FULL 256-bit asset_id.
+// Sits next to ticker text everywhere as an anti-phishing fingerprint:
+// even if an attacker grinds 8 hex chars of asset_id to spoof a name +
+// fragment, the identicon (keyed on all 64 hex chars) won't match.
+//
+// Distinct from AssetThumb, which can show the etcher-provided image
+// (which can be copied/spoofed). This badge is uniquely keyed to
+// chain-derived identity and impossible to fake without a full
+// 256-bit hash collision.
+import { identiconSvg } from "../lib/identicon";
+
+interface Props {
+  assetId: string;
+  size?: number;
+}
+const { assetId, size = 14 } = Astro.props;
+const svg = identiconSvg(assetId, size);
+---
+
+<span
+  class="asset-mark"
+  style={`width:${size}px;height:${size}px`}
+  title={`identicon · ${assetId.slice(0, 8)}…`}
+  aria-label="asset identicon"
+  set:html={svg}
+/>

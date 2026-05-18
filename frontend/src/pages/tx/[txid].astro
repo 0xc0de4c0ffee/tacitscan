@@ -1,0 +1,566 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import AssetMark from "../../components/AssetMark.astro";
+import AssetThumb from "../../components/AssetThumb.astro";
+import { getEnvelope, getCommitmentsByTx, setEnvelopeFee, getDuplicateTickers, getIndexerTipHeight } from "../../lib/queries";
+import { bytesToHex, formatAmount, relativeTime, shortHex, OPCODE_DESCRIPTIONS, describeBadge, displayAssetName } from "../../lib/format";
+import { fetchTxFee } from "../../lib/esplora";
+import { fetchAssetMetadata, formatRevealedSupply } from "../../lib/etch-metadata";
+import airdropHistory from "../../data/airdrop-history.json";
+
+const { txid } = Astro.params;
+if (!txid) return Astro.redirect("/");
+const row = await getEnvelope(txid);
+if (!row) {
+  Astro.response.status = 404;
+  return new Response(`No Tacit envelope at txid ${txid}`, { status: 404 });
+}
+const { env, asset } = row;
+const commitments = await getCommitmentsByTx(txid);
+const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
+const duplicates = asset ? await getDuplicateTickers(network) : new Set<string>();
+const assetDisplay = asset ? displayAssetName(asset.ticker, asset.assetId, duplicates.has(asset.ticker)) : "";
+
+// Confirmation count. Bitcoin reorgs >5 blocks have never happened on
+// mainnet post-2013, so the tiers are tighter than a general explorer
+// would use:
+//   0     — mempool (orange "unconfirmed")
+//   1     — yellow ("1 confirmation, reorgable")
+//   2-5   — green ("confirmed but recent")
+//   6+    — deep green ("final")
+//   orphaned — gray ("reorged out")
+const tipHeight = await getIndexerTipHeight(network);
+const confirmations =
+  env.chainStatus === "mempool" || env.blockHeight == null || tipHeight == null
+    ? 0
+    : Math.max(0, tipHeight - env.blockHeight + 1);
+type ConfLevel = "mempool" | "low" | "mid" | "final" | "orphaned";
+const confLevel: ConfLevel =
+  env.chainStatus === "orphaned"
+    ? "orphaned"
+    : env.chainStatus === "mempool" || confirmations === 0
+      ? "mempool"
+      : confirmations === 1
+        ? "low"
+        : confirmations <= 5
+          ? "mid"
+          : "final";
+const CONF_LABEL: Record<ConfLevel, string> = {
+  mempool: "unconfirmed · in mempool",
+  low: "1 confirmation",
+  mid: `${confirmations} confirmations`,
+  final: `${confirmations} confirmations · final`,
+  orphaned: "orphaned · reorged out",
+};
+
+// Lazy fee backfill: dRPC's getblock v2 doesn't include per-tx fees, so
+// the indexer stores null/0. On first view of a tx page, fetch the real
+// fee from Esplora (~300ms), persist it, and use it in this render.
+// Subsequent views read from the DB row.
+let displayFee = env.feeSats;
+if (displayFee === null || displayFee === 0n) {
+  const fee = await fetchTxFee(env.txid);
+  if (fee !== null && fee >= 0) {
+    displayFee = BigInt(fee);
+    // Fire-and-forget the write — don't block the response on it.
+    setEnvelopeFee(env.txid, displayFee).catch(() => undefined);
+  }
+}
+
+const sigToHex = (b: Uint8Array | null) => (b ? bytesToHex(b) : null);
+
+// For etch envelopes, decode the off-chain metadata blob (same helper the
+// asset page uses). For non-etch envelopes this is a no-op (asset is the
+// row that came from a separate query, and only etches set imageUri).
+const isEtch = env.opcode === "CETCH" || env.opcode === "T_PETCH";
+const etchMetadata = isEtch && asset?.imageUri ? await fetchAssetMetadata(asset.imageUri) : null;
+const etchAttest = etchMetadata?.attest ?? null;
+const etchRevealedSupply = etchAttest?.supply && asset
+  ? formatRevealedSupply(etchAttest.supply, asset.decimals)
+  : null;
+
+// If this CXFER is one of our airdrop fulfilment broadcasts, pull the
+// recipient list out of the committed snapshot. Lets viewers see who
+// got paid in this batch without leaving the tx page.
+let airdropBatch: { recipients: { i: number; a: string | null; v: string | null; e?: string | null }[]; t: number | null } | null = null;
+if (env.opcode === "CXFER") {
+  const match = (airdropHistory.batches as any[]).find((b) => b.reveal && String(b.reveal).toLowerCase() === env.txid.toLowerCase());
+  if (match) airdropBatch = { recipients: match.recipients, t: match.t };
+}
+
+// Plain-English summary based on opcode + decoded fields. Used at the
+// top of the page so anyone (not just protocol nerds) sees what
+// happened without having to read every dl row.
+function formatAmtSimple(v: bigint | null | undefined, dec: number): string {
+  if (v == null) return "—";
+  try {
+    const div = 10n ** BigInt(dec);
+    const whole = v / div;
+    const frac = v % div;
+    if (frac === 0n) return whole.toLocaleString();
+    const fracStr = frac.toString().padStart(dec, "0").replace(/0+$/, "");
+    return `${whole.toLocaleString()}.${fracStr}`;
+  } catch { return String(v); }
+}
+const ticker = asset?.ticker ?? "the asset";
+const decimals = asset?.decimals ?? 0;
+let summary: { headline: string; detail: string } | null = null;
+switch (env.opcode) {
+  case "CETCH":
+    summary = {
+      headline: `Etched ${ticker} (confidential supply)`,
+      detail: `Issuer created a new confidential token. ${asset?.mintAuthority ? "Mintable — further supply can be added by the mint authority." : "Immutable supply — no further mints possible."} ${etchRevealedSupply ? `Supply revealed off-chain: ${etchRevealedSupply} ${ticker}.` : "Supply is hidden on-chain (Pedersen commitment); the issuer may publish the opening via the metadata blob."}`,
+    };
+    break;
+  case "T_PETCH":
+    summary = {
+      headline: `Declared ${ticker} (permissionless mint)`,
+      detail: `Fair-launch asset declaration. Anyone in the mint window can claim a fixed-size tranche via T_PMINT.`,
+    };
+    break;
+  case "CXFER":
+    if (airdropBatch) {
+      summary = {
+        headline: `Airdrop fulfilment — ${airdropBatch.recipients.length} ${ticker} recipients`,
+        detail: `This CXFER was broadcast by the airdrop daemon. ${airdropBatch.recipients.length} recipients received their TAC in a single confidential batch. See the recipient list below.`,
+      };
+    } else {
+      summary = {
+        headline: `Confidential transfer of ${ticker}`,
+        detail: `${env.n ?? "?"} recipient${env.n === 1 ? "" : "s"} received ${ticker}. Amounts are blinded behind Pedersen commitments; only sender + recipients can decode them.`,
+      };
+    }
+    break;
+  case "T_AXFER":
+    summary = {
+      headline: `Atomic OTC settlement (${ticker})`,
+      detail: `Confidential asset transfer mixed with a public BTC payment. ${env.assetInputCount ? `${env.assetInputCount} asset input${env.assetInputCount === 1 ? "" : "s"} consumed by the kernel signature` : ""}.`,
+    };
+    break;
+  case "T_MINT":
+    summary = {
+      headline: `Minted ${ticker} (confidential amount)`,
+      detail: `Issuer added new supply on a mintable asset. The new mint's amount is confidential; only the issuer's metadata reveal can disclose it.`,
+    };
+    break;
+  case "T_PMINT":
+    summary = {
+      headline: `Permissionless mint of ${ticker}`,
+      detail: `Anyone-can-mint claim against a T_PETCH declaration. Amount per mint is fixed by the parent T_PETCH; this is one tranche.`,
+    };
+    break;
+  case "T_BURN":
+    summary = {
+      headline: `Burned ${formatAmtSimple(env.burnedAmount, decimals)} ${ticker}`,
+      detail: `Permanently destroyed supply. The burned amount is public so total-supply accounting stays auditable.`,
+    };
+    break;
+  case "T_DEPOSIT":
+    summary = {
+      headline: `Mixer deposit (${ticker})`,
+      detail: `Locked a denomination-${formatAmtSimple(env.denomination, decimals)} UTXO into the per-asset privacy pool. Subsequent T_WITHDRAW envelopes can anonymously mint from this pool without revealing which deposit they came from.`,
+    };
+    break;
+  case "T_WITHDRAW":
+    summary = {
+      headline: `Mixer withdrawal (${ticker})`,
+      detail: `Anonymous mint from the privacy pool of denomination ${formatAmtSimple(env.denomination, decimals)}. The accompanying zk-SNARK proof shows membership without revealing which deposit was spent; the nullifier hash prevents double-spends.`,
+    };
+    break;
+}
+
+const description = `${env.opcode} envelope${asset ? ` for ${asset.ticker}` : ""} at Bitcoin block ${env.blockHeight}. ${OPCODE_DESCRIPTIONS[env.opcode] ?? ""}`;
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "Thing",
+  name: `${env.opcode} ${shortHex(env.txid, 8, 6)}`,
+  identifier: env.txid,
+  description,
+  url: `https://tacitscan.io/tx/${env.txid}`,
+  additionalType: `Tacit${env.opcode}`,
+};
+---
+
+<Layout
+  title={`${env.opcode} · ${shortHex(txid, 8, 6)} · tacitscan`}
+  description={description}
+  jsonLd={jsonLd}
+>
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    {asset && (
+      <a href={`/assets/${asset.assetId}`} style="display:inline-flex;align-items:center;text-decoration:none;">
+        <AssetThumb
+          imageUri={asset.imageUri}
+          resolvedImageUrl={asset.resolvedImageUrl}
+          assetId={asset.assetId}
+          ticker={asset.ticker}
+          size={32}
+        />
+      </a>
+    )}
+    <h1 style="margin:0">{env.opcode}{asset && <> <span class="muted" style="font-weight:500;">·</span> <a href={`/assets/${asset.assetId}`} style="color:inherit;">{assetDisplay}</a></>}</h1>
+    <span class={`pill ${env.opcode.toLowerCase()}`} data-tip={describeBadge(env.opcode)}>{env.opcode}</span>
+    <span class={env.status === "ok" ? "status-ok" : "status-malformed"} style="font-size:12px">
+      {env.status === "ok" ? "✓ decoded" : "✗ " + (env.decodeError ?? env.status)}
+    </span>
+    <span class={`conf-badge conf-${confLevel}`} data-tip={CONF_LABEL[confLevel]}>{CONF_LABEL[confLevel]}</span>
+  </div>
+  <p class="muted" style="margin-top:6px;max-width:680px">
+    {OPCODE_DESCRIPTIONS[env.opcode] ?? ""}
+  </p>
+
+  {summary && (
+    <section class="tx-summary" style="margin-top:18px;padding:14px 16px;border:1px solid var(--ink-faint,#ddd);border-radius:6px;background:var(--bg-warm,#fafafa);display:flex;gap:14px;align-items:flex-start;">
+      {asset && (
+        <a href={`/assets/${asset.assetId}`} style="flex-shrink:0;text-decoration:none;">
+          <AssetThumb
+            imageUri={asset.imageUri}
+            resolvedImageUrl={asset.resolvedImageUrl}
+            assetId={asset.assetId}
+            ticker={asset.ticker}
+            size={40}
+          />
+        </a>
+      )}
+      <div style="flex:1;min-width:0;">
+        <h2 style="margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-mid,#666);">What happened</h2>
+        <p style="margin:0 0 4px;font-size:14px;font-weight:600;">{summary.headline}</p>
+        <p class="muted" style="margin:0;font-size:12.5px;line-height:1.5;max-width:760px;">{summary.detail}</p>
+      </div>
+    </section>
+  )}
+
+  <h2>Transaction</h2>
+  <dl class="kv">
+    <dt>txid</dt>
+    <dd class="mono">{env.txid}</dd>
+    <dt>status</dt>
+    <dd>
+      <span class={`conf-badge conf-${confLevel}`}>{CONF_LABEL[confLevel]}</span>
+      {env.chainStatus === "mempool" && (
+        <span class="muted" style="margin-left:8px">first seen {relativeTime(env.firstSeenAt)}</span>
+      )}
+    </dd>
+    {env.blockHeight !== null && env.blockHeight !== undefined ? (
+      <>
+        <dt>block</dt>
+        <dd class="mono">{env.blockHeight} <span class="muted">· tx_index {env.txIndex}</span></dd>
+        <dt>block_hash</dt>
+        <dd class="mono">{env.blockHash}</dd>
+        <dt>block_time</dt>
+        <dd>{env.blockTime ? new Date(env.blockTime).toISOString() : "—"} {env.blockTime && <span class="muted">· {relativeTime(env.blockTime)}</span>}</dd>
+      </>
+    ) : (
+      <>
+        <dt>block</dt>
+        <dd class="muted">pending — not yet mined</dd>
+      </>
+    )}
+    <dt>fee</dt>
+    <dd class="mono">{displayFee !== null && displayFee !== undefined ? `${displayFee.toString()} sats` : "—"}</dd>
+    <dt>vin / vout</dt>
+    <dd class="mono">{env.inputCount} / {env.outputCount}</dd>
+  </dl>
+
+  {
+    asset && (
+      <>
+        <h2>Asset</h2>
+        <dl class="kv">
+          <dt>ticker</dt>
+          <dd style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <a href={`/assets/${asset.assetId}`} style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;">
+              <AssetThumb
+                imageUri={asset.imageUri}
+                resolvedImageUrl={asset.resolvedImageUrl}
+                assetId={asset.assetId}
+                ticker={asset.ticker}
+                size={24}
+              />
+              <strong>{assetDisplay}</strong>
+              <AssetMark assetId={asset.assetId} size={14} />
+            </a>
+            <span class="muted">· {asset.decimals}d ·</span>
+            <span class={`pill ${asset.kind}`} data-tip={describeBadge(asset.kind)}>{asset.kind}</span>
+          </dd>
+          <dt>asset_id</dt>
+          <dd class="mono">
+            <a href={`/assets/${asset.assetId}`}>{asset.assetId}</a>
+          </dd>
+        </dl>
+      </>
+    )
+  }
+
+  <h2>Envelope</h2>
+  <dl class="kv">
+    <dt>opcode</dt>
+    <dd>
+      {env.opcode}{" "}
+      <span class="muted">
+        — see <a href="https://github.com/z0r0z/tacit/blob/main/SPEC.md">SPEC.md §5</a>
+      </span>
+    </dd>
+    {
+      env.assetId && !asset && (
+        <>
+          <dt>asset_id</dt>
+          <dd class="mono">{env.assetId}</dd>
+        </>
+      )
+    }
+    {
+      env.etchTxid && (
+        <>
+          <dt>etch_txid</dt>
+          <dd class="mono"><a href={`/tx/${env.etchTxid}`}>{env.etchTxid}</a></dd>
+        </>
+      )
+    }
+    {
+      env.n !== null && (
+        <>
+          <dt>N (outputs)</dt>
+          <dd class="mono">{env.n}</dd>
+        </>
+      )
+    }
+    {
+      env.assetInputCount !== null && (
+        <>
+          <dt>asset_input_count</dt>
+          <dd class="mono">{env.assetInputCount}</dd>
+        </>
+      )
+    }
+    {
+      env.publicAmount !== null && (
+        <>
+          <dt>public amount</dt>
+          <dd class="mono">{formatAmount(env.publicAmount, asset?.decimals ?? 0)}</dd>
+        </>
+      )
+    }
+    {
+      env.burnedAmount !== null && (
+        <>
+          <dt>burned</dt>
+          <dd class="mono">{formatAmount(env.burnedAmount, asset?.decimals ?? 0)}</dd>
+        </>
+      )
+    }
+    {
+      env.denomination !== null && (
+        <>
+          <dt>denomination</dt>
+          <dd class="mono">{formatAmount(env.denomination, asset?.decimals ?? 0)}</dd>
+        </>
+      )
+    }
+    {
+      env.merkleRoot && (
+        <>
+          <dt>merkle_root</dt>
+          <dd class="mono">{env.merkleRoot}</dd>
+        </>
+      )
+    }
+    {
+      env.nullifierHash && (
+        <>
+          <dt>nullifier_hash</dt>
+          <dd class="mono">{env.nullifierHash}</dd>
+        </>
+      )
+    }
+    {
+      env.isPoolInit && (
+        <>
+          <dt>flag</dt>
+          <dd>POOL_INIT</dd>
+        </>
+      )
+    }
+  </dl>
+
+  {isEtch && etchMetadata && (etchMetadata.parsed || etchMetadata.error) && (
+    <section class="etch-meta" style="margin-top:24px;padding:14px 16px;border:1px solid var(--ink-faint,#ddd);border-radius:6px;background:var(--bg-warm,#fafafa);">
+      <h2 style="margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-mid,#666);">Etch metadata</h2>
+      <p class="muted" style="font-size:12px;margin:0 0 12px;">
+        Off-chain JSON the issuer published at the envelope's <code class="mono">image_uri</code>.
+        {etchMetadata.gatewayUrl && (
+          <> <a href={etchMetadata.gatewayUrl} target="_blank" rel="noreferrer">view raw</a></>
+        )}
+      </p>
+      {etchMetadata.error && !etchMetadata.parsed && (
+        <p class="muted" style="font-size:12px;color:var(--ink-mid,#666);">
+          Couldn't decode metadata: {etchMetadata.error}
+        </p>
+      )}
+      {etchMetadata.parsed && (
+        <dl class="kv">
+          {etchMetadata.parsed.name && (<><dt>name</dt><dd>{etchMetadata.parsed.name}</dd></>)}
+          {etchMetadata.parsed.description && (<><dt>description</dt><dd>{etchMetadata.parsed.description}</dd></>)}
+          {etchMetadata.parsed.external_url && (
+            <>
+              <dt>external link</dt>
+              <dd><a href={etchMetadata.parsed.external_url} target="_blank" rel="noreferrer" class="mono">{etchMetadata.parsed.external_url}</a></dd>
+            </>
+          )}
+          {typeof etchMetadata.parsed.decimals === "number" && asset && (
+            <>
+              <dt>declared decimals</dt>
+              <dd>
+                <span class="mono">{etchMetadata.parsed.decimals}</span>
+                {etchMetadata.parsed.decimals !== asset.decimals && (
+                  <span class="muted" style="margin-left:8px;color:#b14;">⚠ does not match on-chain ({asset.decimals})</span>
+                )}
+              </dd>
+            </>
+          )}
+          {etchAttest && (
+            <>
+              <dt>supply (revealed)</dt>
+              <dd>
+                {etchRevealedSupply ? (
+                  <>
+                    <span class="mono">{etchRevealedSupply}</span>
+                    {asset && <> <span class="muted">{asset.ticker}</span></>}
+                  </>
+                ) : (
+                  <span class="muted">malformed</span>
+                )}
+                <div class="muted" style="font-size:11px;margin-top:2px;">
+                  Issuer-published. On-chain supply commitment stays confidential; the blinding + commitment below let anyone re-derive the Pedersen point to verify it matches this envelope.
+                </div>
+              </dd>
+              {etchAttest.commitment && (<><dt>commitment</dt><dd class="mono" style="word-break:break-all;">{etchAttest.commitment}</dd></>)}
+              {etchAttest.blinding && (<><dt>blinding</dt><dd class="mono" style="word-break:break-all;">{etchAttest.blinding}</dd></>)}
+            </>
+          )}
+        </dl>
+      )}
+    </section>
+  )}
+
+  {
+    commitments.length > 0 && (
+      <>
+        <h2>Confidential outputs</h2>
+        <div class="card" style="padding:0">
+          <table class="list">
+            <thead>
+              <tr>
+                <th style="width:60px">vout</th>
+                <th>commitment C (33 B)</th>
+                <th style="width:160px">amount_ct (8 B)</th>
+                <th style="width:120px">disclosed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {commitments.map((c) => (
+                <tr>
+                  <td class="mono">
+                    <a href={`/utxo/${c.txid}/${c.vout}`}>{c.vout}</a>
+                  </td>
+                  <td class="mono">{bytesToHex(c.commitmentC)}</td>
+                  <td class="mono muted">
+                    {c.encryptedAmount
+                      ? bytesToHex(c.encryptedAmount)
+                      : <span class="muted">—</span>}
+                  </td>
+                  <td>
+                    {c.isPublicOpening ? (
+                      <span class="status-ok mono">{c.publicAmount?.toString()}</span>
+                    ) : (
+                      <span class="muted">no</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </>
+    )
+  }
+
+  {airdropBatch && (
+    <section style="margin-top:20px;">
+      <h2>Airdrop recipients</h2>
+      <p class="muted" style="font-size:12px;margin:-4px 0 8px;">
+        Identified from the airdrop daemon's local state. {airdropBatch.recipients.length} recipient{airdropBatch.recipients.length === 1 ? "" : "s"} received TAC in this batch.
+      </p>
+      <div class="card" style="padding:0">
+        <table class="list">
+          <thead>
+            <tr>
+              <th style="width:60px;">leaf</th>
+              <th>recipient bc1q</th>
+              <th style="width:140px;">amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {airdropBatch.recipients.map((r) => (
+              <tr>
+                <td class="mono">{r.i}</td>
+                <td class="mono">
+                  {r.a ? (
+                    <a href={`/airdrop/queue?check=${r.a}`}>{r.a}</a>
+                  ) : (
+                    <span class="muted">—</span>
+                  )}
+                </td>
+                <td class="mono">{r.v ? formatAmount(BigInt(r.v), decimals) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )}
+
+  <h2>Signatures &amp; proofs</h2>
+  <dl class="kv">
+    {
+      env.kernelSig && (
+        <>
+          <dt>kernel_sig</dt>
+          <dd class="bytes">{sigToHex(env.kernelSig)}</dd>
+        </>
+      )
+    }
+    {
+      env.issuerSig && (
+        <>
+          <dt>issuer_sig</dt>
+          <dd class="bytes">{sigToHex(env.issuerSig)}</dd>
+        </>
+      )
+    }
+    {
+      env.rangeproof && (
+        <>
+          <dt>rangeproof <span class="muted">({env.rangeproof.length} B)</span></dt>
+          <dd class="bytes">{sigToHex(env.rangeproof)}</dd>
+        </>
+      )
+    }
+    {
+      env.proofBytes && (
+        <>
+          <dt>groth16 proof <span class="muted">({env.proofBytes.length} B)</span></dt>
+          <dd class="bytes">{sigToHex(env.proofBytes)}</dd>
+        </>
+      )
+    }
+  </dl>
+
+  <h2>Raw</h2>
+  <dl class="kv">
+    <dt>witness <span class="muted">({env.rawWitness.length} B)</span></dt>
+    <dd class="bytes">{bytesToHex(env.rawWitness)}</dd>
+    <dt>payload <span class="muted">({env.rawPayload.length} B)</span></dt>
+    <dd class="bytes">{bytesToHex(env.rawPayload)}</dd>
+  </dl>
+</Layout>

@@ -1,0 +1,484 @@
+---
+// Fully client-side dynamic page. The page itself is static HTML +
+// CSS that ISR can safely cache forever; the form submission fires a
+// fetch to /api/airdrop-check (which is excluded from ISR in
+// astro.config.mjs), reads JSON, and updates the DOM in place. This
+// bypasses the "ISR strips query params" caching collapse that earlier
+// broke per-input rendering when the page itself was SSR-with-query.
+import Layout from "../layouts/Layout.astro";
+import { SNAPSHOT_AT, SNAPSHOT_SOURCE_COMMIT, SOURCES } from "../lib/airdrop";
+import { relativeTime } from "../lib/format";
+
+const snapshotDate = SNAPSHOT_AT.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+const snapshotRel = relativeTime(SNAPSHOT_AT);
+const totalSnapshotted = SOURCES.reduce((sum, s) => sum + s.balances.size, 0);
+---
+
+<Layout
+  title="Airdrop eligibility · tacitscan"
+  description="Check if your Ethereum address is eligible for the Tacit airdrop based on the published snapshot."
+>
+  <div class="airdrop-wrap">
+    <h1 class="airdrop-h1">Airdrop check</h1>
+    <p class="airdrop-sub">
+      Paste your Ethereum address (or ENS / .wei name) to see if it's on the published snapshot. {totalSnapshotted.toLocaleString()} addresses eligible.
+    </p>
+    <p class="airdrop-snapshot">
+      Snapshot taken <strong>{snapshotDate}</strong> <span class="muted">· {snapshotRel}</span><br />
+      <span class="muted" style="font-size:11px">
+        Source: <a href={SNAPSHOT_SOURCE_COMMIT.url} target="_blank" rel="noreferrer">{SNAPSHOT_SOURCE_COMMIT.repo}@{SNAPSHOT_SOURCE_COMMIT.sha}</a>
+      </span>
+    </p>
+    <p class="airdrop-queue-link">
+      <a href="/airdrop/queue">→ View live fulfilment queue</a>
+    </p>
+
+    <form id="airdrop-form" class="airdrop-form" novalidate>
+      <input
+        type="text"
+        id="airdrop-input"
+        name="addr"
+        placeholder="0x… or name.eth or name.wei"
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck="false"
+        inputmode="text"
+        class="airdrop-input mono"
+        aria-label="Ethereum address or name"
+      />
+      <button type="submit" id="airdrop-submit" class="airdrop-submit">Check</button>
+    </form>
+
+    <div id="airdrop-status" class="airdrop-status" hidden></div>
+    <div id="airdrop-out"></div>
+  </div>
+</Layout>
+
+<template id="airdrop-template-eligible">
+  <div class="airdrop-result airdrop-eligible">
+    <img src="/img/airdrop-eligible.gif" alt="" width="240" height="300" class="airdrop-gif" loading="eager" decoding="async" />
+    <div class="airdrop-verdict">Eligible</div>
+    <div class="airdrop-resolved mono" data-slot="resolved" hidden></div>
+    <div class="airdrop-wns-note" data-slot="name-note" hidden>
+      Name resolution uses the name's current owner — if it was transferred after the snapshot, paste your snapshot-time 0x address directly to be sure.
+    </div>
+    <div class="airdrop-weight" data-slot="tac">—</div>
+    <div class="airdrop-weight-sub">your allocation</div>
+    <div class="airdrop-rank" data-slot="rank"></div>
+    <div class="airdrop-flavor" data-slot="flavor">The heavens have recognized your roots ☯</div>
+    <a class="airdrop-tweet" data-slot="tweet" target="_blank" rel="noreferrer" href="#">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+      Tweet your allocation
+    </a>
+    <details class="airdrop-details">
+      <summary>Breakdown</summary>
+      <ul class="airdrop-breakdown" data-slot="breakdown"></ul>
+      <p class="muted" style="font-size:11px;margin-top:8px">
+        The final claim amount is determined by the airdrop publisher's merkle leaf weights, which may differ from raw snapshot balances.
+      </p>
+    </details>
+  </div>
+</template>
+
+<template id="airdrop-template-ineligible">
+  <div class="airdrop-result airdrop-ineligible">
+    <img src="/img/airdrop-ineligible.gif" alt="" width="320" height="180" class="airdrop-gif" loading="eager" decoding="async" />
+    <div class="airdrop-verdict">Not eligible</div>
+    <div class="airdrop-resolved mono" data-slot="resolved" hidden></div>
+    <div class="airdrop-weight-sub">This address isn't on the snapshot.</div>
+    <div class="airdrop-flavor">The dao has not yet chosen this path.</div>
+  </div>
+</template>
+
+<script is:inline>
+  (function () {
+    const form = document.getElementById("airdrop-form");
+    const input = document.getElementById("airdrop-input");
+    const submit = document.getElementById("airdrop-submit");
+    const status = document.getElementById("airdrop-status");
+    const out = document.getElementById("airdrop-out");
+    const tplEligible = document.getElementById("airdrop-template-eligible");
+    const tplIneligible = document.getElementById("airdrop-template-ineligible");
+    if (!form || !input || !submit || !status || !out || !tplEligible || !tplIneligible) return;
+
+    // Prefill from ?addr= so deep links and shares still work.
+    const initial = new URLSearchParams(window.location.search).get("addr");
+    if (initial) {
+      input.value = initial;
+      void check(initial);
+    }
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      const v = input.value.trim();
+      if (!v) return;
+      // Reflect the input in the URL so refresh / back-button preserves it,
+      // but use replaceState so we don't pollute history with every check.
+      const qs = new URLSearchParams(window.location.search);
+      qs.set("addr", v);
+      window.history.replaceState({}, "", window.location.pathname + "?" + qs.toString());
+      void check(v);
+    });
+
+    function setStatus(msg, kind) {
+      if (!msg) { status.hidden = true; status.textContent = ""; return; }
+      status.hidden = false;
+      status.textContent = msg;
+      status.className = "airdrop-status airdrop-status-" + (kind || "info");
+    }
+
+    function formatBalance(n) {
+      return Number(n).toLocaleString(undefined, { maximumFractionDigits: 4 });
+    }
+
+    function shortAddr(addr) {
+      return addr.slice(0, 10) + "…" + addr.slice(-6);
+    }
+
+    async function check(value) {
+      submit.disabled = true;
+      out.innerHTML = "";
+      setStatus("Checking…", "info");
+      // Hard timeout so a slow function/ENS RPC doesn't leave the user
+      // staring at "Checking…" forever — the snapshot lookup itself is
+      // a Map.get, so 12s is generous even on cold start.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 12000);
+      try {
+        const r = await fetch("/api/airdrop-check?input=" + encodeURIComponent(value), {
+          headers: { accept: "application/json" },
+          signal: ctrl.signal,
+          cache: "no-store",
+        });
+        if (!r.ok) {
+          setStatus("Server responded " + r.status + ". Try again in a moment.", "error");
+          return;
+        }
+        const data = await r.json();
+        if (!data.ok) {
+          setStatus(data.error || "Could not check this address.", "error");
+          return;
+        }
+        setStatus(null);
+        renderResult(data);
+      } catch (e) {
+        if (e && e.name === "AbortError") {
+          setStatus("Request timed out after 12s. Try again.", "error");
+        } else {
+          setStatus("Network error — try again. " + (e && e.message ? e.message : ""), "error");
+        }
+      } finally {
+        clearTimeout(timer);
+        submit.disabled = false;
+      }
+    }
+
+    function renderResult(data) {
+      const tpl = data.eligible ? tplEligible : tplIneligible;
+      const node = tpl.content.firstElementChild.cloneNode(true);
+
+      const resolvedSlot = node.querySelector('[data-slot="resolved"]');
+      if (resolvedSlot && data.resolvedName) {
+        resolvedSlot.hidden = false;
+        if (data.eligible) {
+          const link = document.createElement("a");
+          link.href = "/address/" + data.address;
+          link.textContent = shortAddr(data.address);
+          resolvedSlot.append(document.createTextNode(data.resolvedName + " → "), link);
+        } else {
+          resolvedSlot.textContent = data.resolvedName + " → " + shortAddr(data.address);
+        }
+      }
+
+      const nameNote = node.querySelector('[data-slot="name-note"]');
+      if (nameNote && (data.resolvedVia === "ens" || data.resolvedVia === "wns")) nameNote.hidden = false;
+
+      if (data.eligible) {
+        const tac = node.querySelector('[data-slot="tac"]');
+        if (tac) tac.textContent = formatBalance(data.tacAmount) + " TAC";
+
+        const rank = node.querySelector('[data-slot="rank"]');
+        let pct = null;
+        if (data.rank && data.totalEligible) {
+          pct = (data.rank / data.totalEligible) * 100;
+          const pctStr = pct < 1
+            ? pct.toFixed(2) + "%"
+            : pct < 10
+              ? pct.toFixed(1) + "%"
+              : Math.round(pct) + "%";
+          if (rank) {
+            rank.textContent = "Rank #" + data.rank.toLocaleString() +
+              " of " + data.totalEligible.toLocaleString() +
+              " · top " + pctStr;
+          }
+        }
+
+        // Rank-tiered cultivation flavor — light touch, swapped out for
+        // the static template line based on percentile.
+        const flavor = node.querySelector('[data-slot="flavor"]');
+        if (flavor && pct != null) {
+          const line =
+            data.rank === 1
+              ? "First among the heavens' chosen ☯"
+              : pct <= 1
+                ? "Among the heavens' chosen ☯"
+                : pct <= 10
+                  ? "A disciple of high merit ☯"
+                  : pct <= 50
+                    ? "Your roots have been recognized ☯"
+                    : "Acknowledged by the dao ☯";
+          flavor.textContent = line;
+        }
+
+        const tweet = node.querySelector('[data-slot="tweet"]');
+        if (tweet) {
+          const shareUrl = window.location.origin + "/airdrop?addr=" + encodeURIComponent(data.address);
+          const lines = [
+            "Eligible for " + formatBalance(data.tacAmount) + " TAC in the Tacit airdrop ☯",
+          ];
+          if (data.rank && data.totalEligible) {
+            lines.push("Rank #" + data.rank.toLocaleString() + " of " + data.totalEligible.toLocaleString());
+          }
+          lines.push(shareUrl);
+          const tweetText = lines.join("\n");
+          tweet.href = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(tweetText);
+        }
+
+        const breakdown = node.querySelector('[data-slot="breakdown"]');
+        if (breakdown && Array.isArray(data.perSource)) {
+          for (const p of data.perSource) {
+            const li = document.createElement("li");
+            const lhs = document.createElement("span");
+            const strong = document.createElement("strong");
+            strong.textContent = p.label;
+            const addr = document.createElement("span");
+            addr.className = "muted mono";
+            addr.style.cssText = "font-size:11px;margin-left:6px";
+            addr.textContent = p.contractAddress.slice(0, 10) + "…";
+            lhs.append(strong, addr);
+
+            const rhs = document.createElement("span");
+            if (p.balance != null) {
+              rhs.textContent = formatBalance(p.balance);
+            } else {
+              const dash = document.createElement("span");
+              dash.className = "muted";
+              dash.textContent = "—";
+              rhs.append(dash);
+            }
+            li.append(lhs, rhs);
+            breakdown.append(li);
+          }
+        }
+      }
+      out.append(node);
+    }
+  })();
+</script>
+
+<style>
+  .airdrop-wrap {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 16px 8px;
+  }
+  .airdrop-h1 {
+    text-align: center;
+    margin-bottom: 4px;
+    font-size: 32px;
+  }
+  .airdrop-sub {
+    text-align: center;
+    color: var(--text-muted);
+    margin-top: 0;
+    margin-bottom: 12px;
+    font-size: 14px;
+  }
+  .airdrop-snapshot {
+    text-align: center;
+    margin-top: 0;
+    margin-bottom: 24px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+  }
+  .airdrop-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .airdrop-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 16px 18px;
+    font-size: 16px;
+    border: 2px solid var(--border-strong);
+    border-radius: 12px;
+    background: var(--bg);
+    color: var(--text);
+    transition: border-color 0.15s;
+  }
+  .airdrop-input:focus {
+    outline: none;
+    border-color: var(--accent, #2563eb);
+  }
+  .airdrop-submit {
+    width: 100%;
+    padding: 16px;
+    font-size: 16px;
+    font-weight: 600;
+    background: var(--accent, #2563eb);
+    color: white;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .airdrop-submit:hover {
+    opacity: 0.9;
+  }
+  .airdrop-submit:disabled {
+    opacity: 0.6;
+    cursor: progress;
+  }
+  .airdrop-status {
+    margin-top: 14px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    text-align: center;
+  }
+  .airdrop-status-info {
+    background: #eff6ff;
+    color: #1e3a8a;
+  }
+  .airdrop-status-error {
+    background: #fef2f2;
+    color: #991b1b;
+  }
+  .airdrop-result {
+    margin-top: 28px;
+    padding: 28px 20px;
+    border-radius: 16px;
+    text-align: center;
+  }
+  .airdrop-eligible {
+    background: linear-gradient(135deg, #ecfdf5, #d1fae5);
+    border: 2px solid #6ee7b7;
+    overflow: hidden;
+    position: relative;
+  }
+  .airdrop-ineligible {
+    background: #f9fafb;
+    border: 2px solid #e5e7eb;
+  }
+  .airdrop-verdict {
+    font-size: 28px;
+    font-weight: 700;
+    margin-top: 8px;
+  }
+  .airdrop-eligible .airdrop-verdict {
+    color: #065f46;
+  }
+  .airdrop-ineligible .airdrop-verdict {
+    color: #4b5563;
+  }
+  .airdrop-weight {
+    font-size: 36px;
+    font-weight: 700;
+    color: #064e3b;
+    margin-top: 16px;
+    font-variant-numeric: tabular-nums;
+  }
+  .airdrop-weight-sub {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-top: 2px;
+  }
+  .airdrop-resolved {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    word-break: break-all;
+  }
+  .airdrop-resolved a {
+    color: inherit;
+  }
+  .airdrop-rank {
+    margin-top: 8px;
+    font-size: 13px;
+    color: #047857;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .airdrop-tweet {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 14px;
+    padding: 10px 18px;
+    background: #000;
+    color: #fff;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .airdrop-tweet:hover {
+    background: #1a1a1a;
+    text-decoration: none;
+    color: #fff;
+  }
+  .airdrop-flavor {
+    margin-top: 14px;
+    font-size: 13px;
+    color: #047857;
+    font-style: italic;
+  }
+  .airdrop-ineligible .airdrop-flavor {
+    color: #6b7280;
+  }
+  .airdrop-wns-note {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .airdrop-details {
+    margin-top: 20px;
+    text-align: left;
+    font-size: 13px;
+  }
+  .airdrop-details summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    padding: 6px 0;
+  }
+  .airdrop-breakdown {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 0;
+  }
+  .airdrop-breakdown li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  }
+  .airdrop-breakdown li:last-child {
+    border-bottom: none;
+  }
+  .airdrop-gif {
+    display: block;
+    margin: 0 auto 8px;
+    max-width: 240px;
+    width: 100%;
+    height: auto;
+    border-radius: 12px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .airdrop-gif {
+      display: none;
+    }
+  }
+</style>

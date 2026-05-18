@@ -1,0 +1,509 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import AssetThumb from "../../components/AssetThumb.astro";
+import AssetMark from "../../components/AssetMark.astro";
+import {
+  getAsset,
+  getAssetMints,
+  getAssetBurns,
+  getAssetTransfers,
+  getAssetCounts,
+  getCumulativeBurned,
+  getMintStats,
+  getDuplicateTickers,
+} from "../../lib/queries";
+import { shortHex, formatAmount, relativeTime, resolveImageUri, describeBadge, displayAssetName } from "../../lib/format";
+import { identiconSvg } from "../../lib/identicon";
+import { encodeP2TR } from "../../lib/bech32";
+import { fetchAssetMetadata, formatRevealedSupply } from "../../lib/etch-metadata";
+
+const { id } = Astro.params;
+if (!id) {
+  return Astro.redirect("/assets");
+}
+const asset = await getAsset(id);
+if (!asset) {
+  Astro.response.status = 404;
+  return Astro.redirect("/assets");
+}
+const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
+const [mints, burns, transfers, counts, mintStats, cumBurned, duplicates, metadata] = await Promise.all([
+  getAssetMints(id, asset.capAmount, asset.mintLimit),
+  getAssetBurns(id),
+  getAssetTransfers(id),
+  getAssetCounts(id),
+  getMintStats(id, asset.capAmount, asset.mintLimit),
+  getCumulativeBurned(id),
+  getDuplicateTickers(network),
+  fetchAssetMetadata(asset.imageUri),
+]);
+const attest = metadata.attest;
+const revealedSupply = attest?.supply ? formatRevealedSupply(attest.supply, asset.decimals) : null;
+const hasCollision = duplicates.has(asset.ticker);
+const displayName = displayAssetName(asset.ticker, asset.assetId, hasCollision);
+
+const isPetch = asset.kind === "t_petch";
+const cumMinted = mintStats.cumMinted;
+const cumNet = cumMinted - cumBurned;
+const remainingCap =
+  isPetch && asset.capAmount !== null ? asset.capAmount - cumMinted : null;
+const slotsTotal =
+  isPetch && asset.capAmount && asset.mintLimit ? asset.capAmount / asset.mintLimit : null;
+const slotsUsed = isPetch ? mintStats.effectiveCount : null;
+const validationProgress =
+  mintStats.rawCount > 0 ? Math.round((mintStats.checkedCount / mintStats.rawCount) * 100) : 100;
+
+// Per-row T_PMINT/T_MINT status badge metadata. Keeps the Record<>
+// generic type out of the template body (Astro's parser chokes on it).
+const STATUS_INFO: Record<string, { label: string; cls: string; tipDefault: string }> = {
+  credited: { label: "credited", cls: "t_mint", tipDefault: "Counts toward supply per SPEC validation." },
+  "cap-overflow": { label: "cap overflow", cls: "t_burn", tipDefault: "Valid envelope but cap was already full at this canonical position. No spendable supply." },
+  invalid: { label: "invalid", cls: "t_burn", tipDefault: "Failed validation per SPEC." },
+  pending: { label: "pending", cls: "unknown", tipDefault: "Validator hasn't checked this envelope yet." },
+  ok: { label: "ok", cls: "t_mint", tipDefault: "" },
+};
+
+const heroImage = asset.resolvedImageUrl ?? resolveImageUri(asset.imageUri) ?? undefined;
+const description = `${asset.ticker} (${asset.kind}) — ${describeBadge(asset.kind)} ${asset.decimals} decimals. Etched at Bitcoin block ${asset.etchHeight}.`;
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "Thing",
+  name: asset.ticker,
+  identifier: asset.assetId,
+  description,
+  image: heroImage,
+  url: `https://tacitscan.io/assets/${asset.assetId}`,
+  additionalType: asset.kind === "cetch" ? "TacitCETCH" : "TacitTPETCH",
+};
+---
+
+<Layout
+  title={`${displayName} · tacitscan`}
+  description={description}
+  ogImage={heroImage ?? "/tacit.svg"}
+  jsonLd={jsonLd}
+>
+  <div class="asset-header">
+    <span class="asset-hero-thumb">
+      {
+        (() => {
+          const heroSrc = asset.resolvedImageUrl ?? resolveImageUri(asset.imageUri);
+          return heroSrc ? (
+            <img src={heroSrc} alt={asset.ticker} loading="eager" />
+          ) : (
+            <span class="identicon" set:html={identiconSvg(asset.assetId, 96)} />
+          );
+        })()
+      }
+    </span>
+    <div class="meta" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <h1 style="display:inline-flex;align-items:center;gap:4px">
+        <span>{asset.ticker}</span>
+        <AssetMark assetId={asset.assetId} size={18} />
+        {hasCollision && (
+          <span class="muted mono" style="font-size:14px;font-weight:500;letter-spacing:0">
+            #{asset.assetId.slice(0, 8)}
+          </span>
+        )}
+      </h1>
+      <span class={`pill ${asset.kind}`} data-tip={describeBadge(asset.kind)}>{asset.kind}</span>
+      {
+        asset.mintAuthority && (
+          <span class="pill cxfer" data-tip="Issuer can mint additional supply via T_MINT envelopes signed by the mint_authority pubkey.">
+            mintable
+          </span>
+        )
+      }
+      {
+        isPetch && mintStats.mintedOut && (
+          <span class="pill t_burn" data-tip="Cap reached. Any further T_PMINT envelopes will fail cap-overflow per SPEC §5.9.">
+            minted out
+          </span>
+        )
+      }
+    </div>
+  </div>
+
+  <dl class="kv" style="margin-top:14px">
+    <dt>asset_id</dt>
+    <dd class="mono">{asset.assetId}</dd>
+    <dt>decimals</dt>
+    <dd class="mono">{asset.decimals}</dd>
+    {
+      asset.imageUri && (
+        <>
+          <dt>image</dt>
+          <dd class="mono">{asset.imageUri}</dd>
+        </>
+      )
+    }
+    <dt>etched</dt>
+    <dd>
+      block <a href={`/tx/${asset.etchTxid}`} class="mono">{asset.etchHeight}</a>
+      <span class="muted"> · {relativeTime(asset.etchBlockTime)}</span>
+    </dd>
+    <dt>etch tx</dt>
+    <dd class="mono"><a href={`/tx/${asset.etchTxid}`}>{asset.etchTxid}</a></dd>
+    {
+      asset.mintAuthority && (
+        <>
+          <dt>mint authority</dt>
+          <dd class="mono">
+            {(() => {
+              const addr = encodeP2TR(network as "mainnet" | "signet" | "testnet", asset.mintAuthority);
+              return addr ? (
+                <a href={`/address/${addr}`}>{asset.mintAuthority}</a>
+              ) : (
+                asset.mintAuthority
+              );
+            })()}
+          </dd>
+        </>
+      )
+    }
+    {
+      isPetch && (
+        <>
+          <dt>max supply</dt>
+          <dd>
+            <span class="mono">{formatAmount(asset.capAmount, asset.decimals)}</span>{" "}
+            <span class="muted">{asset.ticker}</span>
+          </dd>
+          <dt>amount per mint</dt>
+          <dd>
+            <span class="mono">{formatAmount(asset.mintLimit, asset.decimals)}</span>{" "}
+            <span class="muted">{asset.ticker}</span>
+          </dd>
+          <dt>mint window</dt>
+          <dd>
+            {(() => {
+              const startBlock =
+                asset.mintStartHeight && asset.mintStartHeight !== 0
+                  ? asset.mintStartHeight
+                  : asset.etchHeight + 1;
+              const endBlock =
+                asset.mintEndHeight && asset.mintEndHeight !== 0 ? asset.mintEndHeight : null;
+              return (
+                <>
+                  block <span class="mono">{startBlock}</span> →{" "}
+                  {endBlock ? (
+                    <span class="mono">{endBlock}</span>
+                  ) : (
+                    <span class="muted">no end</span>
+                  )}
+                </>
+              );
+            })()}
+          </dd>
+        </>
+      )
+    }
+  </dl>
+
+  {(metadata.parsed || metadata.error) && (
+    <section class="etch-meta" style="margin-top:24px;padding:14px 16px;border:1px solid var(--ink-faint,#ddd);border-radius:6px;background:var(--bg-warm,#fafafa);">
+      <h2 style="margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-mid,#666);">Etch metadata</h2>
+      <p class="muted" style="font-size:12px;margin:0 0 12px;">
+        Off-chain JSON blob the issuer published at the etch's <code class="mono">image_uri</code>.
+        {metadata.gatewayUrl && (
+          <> <a href={metadata.gatewayUrl} target="_blank" rel="noreferrer">view raw</a></>
+        )}
+      </p>
+      {metadata.error && !metadata.parsed && (
+        <p class="muted" style="font-size:12px;color:var(--ink-mid,#666);">
+          Couldn't decode metadata: {metadata.error}
+        </p>
+      )}
+      {metadata.parsed && (
+        <dl class="kv">
+          {metadata.parsed.name && (
+            <>
+              <dt>name</dt>
+              <dd>{metadata.parsed.name}</dd>
+            </>
+          )}
+          {metadata.parsed.description && (
+            <>
+              <dt>description</dt>
+              <dd>{metadata.parsed.description}</dd>
+            </>
+          )}
+          {metadata.parsed.external_url && (
+            <>
+              <dt>external link</dt>
+              <dd><a href={metadata.parsed.external_url} target="_blank" rel="noreferrer" class="mono">{metadata.parsed.external_url}</a></dd>
+            </>
+          )}
+          {typeof metadata.parsed.decimals === "number" && (
+            <>
+              <dt>declared decimals</dt>
+              <dd>
+                <span class="mono">{metadata.parsed.decimals}</span>
+                {metadata.parsed.decimals !== asset.decimals && (
+                  <span class="muted" style="margin-left:8px;color:#b14;">⚠ does not match on-chain ({asset.decimals})</span>
+                )}
+              </dd>
+            </>
+          )}
+          {attest && (
+            <>
+              <dt>supply (revealed)</dt>
+              <dd>
+                {revealedSupply ? (
+                  <>
+                    <span class="mono">{revealedSupply}</span>{" "}
+                    <span class="muted">{asset.ticker}</span>
+                  </>
+                ) : (
+                  <span class="muted">malformed</span>
+                )}
+                <div class="muted" style="font-size:11px;margin-top:2px;">
+                  Issuer-published. On-chain commitment stays confidential; the blinding + commitment below let anyone re-derive the Pedersen point to verify it matches the etch envelope.
+                </div>
+              </dd>
+              {attest.commitment && (
+                <>
+                  <dt>commitment</dt>
+                  <dd class="mono" style="word-break:break-all;">{attest.commitment}</dd>
+                </>
+              )}
+              {attest.blinding && (
+                <>
+                  <dt>blinding</dt>
+                  <dd class="mono" style="word-break:break-all;">{attest.blinding}</dd>
+                </>
+              )}
+            </>
+          )}
+        </dl>
+      )}
+    </section>
+  )}
+
+  <div class="stats" style="margin-top:24px">
+    {
+      isPetch ? (
+        <div class="stat">
+          <div class="label">minted (verified)</div>
+          <div class="value">{formatAmount(cumMinted, asset.decimals)}</div>
+        </div>
+      ) : (
+        <div class="stat">
+          <div class="label">mints</div>
+          <div class="value">{counts["T_MINT"] ?? 0}</div>
+        </div>
+      )
+    }
+    {
+      isPetch && (
+        <div class="stat">
+          <div class="label">slots used</div>
+          <div class="value">
+            {slotsUsed?.toString() ?? "—"} <span class="muted">/ {slotsTotal?.toString() ?? "—"}</span>
+          </div>
+        </div>
+      )
+    }
+    {
+      isPetch && remainingCap !== null && (
+        <div class="stat">
+          <div class="label">remaining cap</div>
+          <div class="value">{formatAmount(remainingCap > 0n ? remainingCap : 0n, asset.decimals)}</div>
+        </div>
+      )
+    }
+    {
+      isPetch && mintStats.capOverflow > 0 && (
+        <div class="stat">
+          <div class="label">cap overflow</div>
+          <div class="value" style="color:var(--yellow)" title="Valid envelopes that confirmed after the cap was already full. Miners forfeit their tx fees per SPEC §5.9.">
+            {mintStats.capOverflow.toLocaleString()}
+          </div>
+        </div>
+      )
+    }
+    {
+      isPetch && validationProgress === 100 && mintStats.rawCount - mintStats.passedCount > 0 && (
+        <div class="stat">
+          <div class="label">invalid envelopes</div>
+          <div class="value" style="color:var(--red)">{mintStats.rawCount - mintStats.passedCount}</div>
+        </div>
+      )
+    }
+    <div class="stat">
+      <div class="label">burns</div>
+      <div class="value">{counts["T_BURN"] ?? 0}</div>
+    </div>
+    <div class="stat">
+      <div class="label">transfers</div>
+      <div class="value">
+        {(counts["CXFER"] ?? 0) + (counts["T_AXFER"] ?? 0)}
+      </div>
+    </div>
+    {
+      isPetch && (
+        <div class="stat">
+          <div class="label">net circulating</div>
+          <div class="value">{formatAmount(cumNet > 0n ? cumNet : 0n, asset.decimals)}</div>
+        </div>
+      )
+    }
+  </div>
+
+  {
+    isPetch && validationProgress < 100 && (
+      <p class="muted" style="font-size:12px;max-width:760px;margin-top:12px;background:var(--orange-bg);border:1px solid rgba(247,147,26,0.3);padding:10px 14px;border-radius:6px">
+        <strong style="color:var(--accent-strong)">Validating supply…</strong>
+        {" "}{mintStats.checkedCount.toLocaleString()} of {mintStats.rawCount.toLocaleString()} T_PMINT envelopes verified ({validationProgress}%).
+        Supply numbers above will firm up as the validator catches up.
+      </p>
+    )
+  }
+  {
+    !isPetch && (
+      <p class="muted" style="font-size:12px;max-width:680px">
+        For CETCH assets, supply changes (T_MINT) are confidential — only the
+        issuer knows the amount. Counts are visible; aggregate supply is not.
+      </p>
+    )
+  }
+
+  <h2>Mints</h2>
+  <div class="card" style="padding:0">
+    <table class="list">
+      <thead>
+        <tr>
+          <th style="width:90px">opcode</th>
+          <th>txid</th>
+          <th style="width:120px">amount</th>
+          <th style="width:110px">status</th>
+          <th style="width:80px">block</th>
+          <th style="width:110px">when</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          mints.length === 0 ? (
+            <tr>
+              <td colspan="6" class="muted" style="text-align:center;padding:24px">
+                no mints
+              </td>
+            </tr>
+          ) : (
+            mints.map((m) => {
+              const reason = m.commitmentInvalidReason ?? m.issuerSigInvalidReason ?? "";
+              const meta = STATUS_INFO[m.status] ?? STATUS_INFO.ok!;
+              const s = { label: meta.label, cls: meta.cls, tip: m.status === "invalid" && reason ? reason : meta.tipDefault };
+              return (
+                <tr>
+                  <td>
+                    <span class={`pill ${m.opcode.toLowerCase()}`} data-tip={describeBadge(m.opcode)}>{m.opcode}</span>
+                  </td>
+                  <td>
+                    <a href={`/tx/${m.txid}`} class="mono">
+                      {shortHex(m.txid, 10, 6)}
+                    </a>
+                  </td>
+                  <td class="mono">
+                    {m.publicAmount
+                      ? formatAmount(m.publicAmount, asset.decimals)
+                      : <span class="muted">hidden</span>}
+                  </td>
+                  <td>
+                    <span class={`pill ${s.cls}`} data-tip={s.tip}>{s.label}</span>
+                  </td>
+                  <td class="mono">{m.blockHeight}</td>
+                  <td class="muted">{relativeTime(m.blockTime)}</td>
+                </tr>
+              );
+            })
+          )
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Burns</h2>
+  <div class="card" style="padding:0">
+    <table class="list">
+      <thead>
+        <tr>
+          <th style="width:90px">opcode</th>
+          <th>txid</th>
+          <th style="width:120px">burned</th>
+          <th style="width:80px">block</th>
+          <th style="width:110px">when</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          burns.length === 0 ? (
+            <tr>
+              <td colspan="5" class="muted" style="text-align:center;padding:24px">
+                no burns
+              </td>
+            </tr>
+          ) : (
+            burns.map((b) => (
+              <tr>
+                <td>
+                  <span class="pill t_burn" data-tip={describeBadge("T_BURN")}>T_BURN</span>
+                </td>
+                <td>
+                  <a href={`/tx/${b.txid}`} class="mono">
+                    {shortHex(b.txid, 10, 6)}
+                  </a>
+                </td>
+                <td class="mono">{formatAmount(b.burnedAmount, asset.decimals)}</td>
+                <td class="mono">{b.blockHeight}</td>
+                <td class="muted">{relativeTime(b.blockTime)}</td>
+              </tr>
+            ))
+          )
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Transfers</h2>
+  <div class="card" style="padding:0">
+    <table class="list">
+      <thead>
+        <tr>
+          <th style="width:90px">opcode</th>
+          <th>txid</th>
+          <th style="width:60px">N</th>
+          <th style="width:80px">block</th>
+          <th style="width:110px">when</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          transfers.length === 0 ? (
+            <tr>
+              <td colspan="5" class="muted" style="text-align:center;padding:24px">
+                no transfers
+              </td>
+            </tr>
+          ) : (
+            transfers.map((tr) => (
+              <tr>
+                <td>
+                  <span class={`pill ${tr.opcode.toLowerCase()}`} data-tip={describeBadge(tr.opcode)}>{tr.opcode}</span>
+                </td>
+                <td>
+                  <a href={`/tx/${tr.txid}`} class="mono">
+                    {shortHex(tr.txid, 10, 6)}
+                  </a>
+                </td>
+                <td class="mono">{tr.n ?? "—"}</td>
+                <td class="mono">{tr.blockHeight}</td>
+                <td class="muted">{relativeTime(tr.blockTime)}</td>
+              </tr>
+            ))
+          )
+        }
+      </tbody>
+    </table>
+  </div>
+</Layout>

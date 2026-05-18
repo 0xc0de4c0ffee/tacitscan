@@ -1,0 +1,98 @@
+---
+import Layout from "../../../layouts/Layout.astro";
+import AssetMark from "../../../components/AssetMark.astro";
+import { getCommitment, getDuplicateTickers } from "../../../lib/queries";
+import { bytesToHex, formatAmount, relativeTime, describeBadge, displayAssetName } from "../../../lib/format";
+
+const { txid, vout } = Astro.params;
+if (!txid || !vout) return Astro.redirect("/");
+const v = Number(vout);
+if (!Number.isInteger(v) || v < 0) return Astro.redirect("/");
+const row = await getCommitment(txid, v);
+if (!row) {
+  Astro.response.status = 404;
+  return new Response(`No Tacit commitment at ${txid}:${v}`, { status: 404 });
+}
+const { c, asset, env } = row;
+const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
+const duplicates = asset ? await getDuplicateTickers(network) : new Set<string>();
+const assetDisplay = asset ? displayAssetName(asset.ticker, asset.assetId, duplicates.has(asset.ticker)) : "";
+---
+
+<Layout title={`utxo ${txid.slice(0, 8)}:${v} · tacitscan`}>
+  <h1>UTXO commitment</h1>
+  <p class="muted" style="max-width:680px">
+    A Tacit UTXO is a P2TR output whose committed amount is hidden behind a
+    Pedersen commitment. The amount is recoverable only by the recipient (or,
+    for T_PMINT/T_WITHDRAW outputs, public on chain).
+  </p>
+
+  <dl class="kv">
+    <dt>outpoint</dt>
+    <dd class="mono">{txid}:{v}</dd>
+    <dt>asset</dt>
+    <dd>
+      {
+        asset ? (
+          <>
+            <a href={`/assets/${asset.assetId}`} style="display:inline-flex;align-items:center">
+              <strong>{assetDisplay}</strong>
+              <AssetMark assetId={asset.assetId} size={14} />
+            </a>
+            <span class="muted"> · {asset.decimals}d · </span>
+            <span class={`pill ${asset.kind}`} data-tip={describeBadge(asset.kind)}>{asset.kind}</span>
+          </>
+        ) : (
+          <span class="mono muted">{c.assetId}</span>
+        )
+      }
+    </dd>
+    <dt>asset_id</dt>
+    <dd class="mono"><a href={`/assets/${c.assetId}`}>{c.assetId}</a></dd>
+    <dt>parent envelope</dt>
+    <dd>
+      <a href={`/tx/${c.txid}`} class="mono">{c.txid}</a>
+      {env && (
+        <span> · <span class={`pill ${env.opcode.toLowerCase()}`} data-tip={describeBadge(env.opcode)}>{env.opcode}</span></span>
+      )}
+    </dd>
+    <dt>block</dt>
+    <dd class="mono">
+      {c.blockHeight}
+      {env && (
+        <span class="muted"> · {relativeTime(env.blockTime)}</span>
+      )}
+    </dd>
+    <dt>commitment C</dt>
+    <dd class="mono">{bytesToHex(c.commitmentC)}</dd>
+    {
+      c.encryptedAmount && (
+        <>
+          <dt>amount_ct</dt>
+          <dd class="mono">{bytesToHex(c.encryptedAmount)}</dd>
+        </>
+      )
+    }
+    {
+      c.isPublicOpening && (
+        <>
+          <dt>public amount</dt>
+          <dd class="mono status-ok">{formatAmount(c.publicAmount, asset?.decimals ?? 0)}</dd>
+          {c.publicBlinding && (
+            <>
+              <dt>public blinding</dt>
+              <dd class="mono">{bytesToHex(c.publicBlinding)}</dd>
+            </>
+          )}
+        </>
+      )
+    }
+  </dl>
+
+  <p class="muted" style="font-size:12px;margin-top:18px;max-width:680px">
+    Validating this UTXO end-to-end requires walking ancestry back to the etch
+    envelope and verifying every kernel signature and rangeproof on the path.
+    tacitscan stores the bytes for the proofs but does not gate the page on
+    verification — that's a deliberate trade for explorer responsiveness.
+  </p>
+</Layout>

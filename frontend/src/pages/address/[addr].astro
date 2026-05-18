@@ -1,0 +1,188 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import AssetMark from "../../components/AssetMark.astro";
+import {
+  getAssetsEtchedBy,
+  getAssetsWithMintAuthority,
+  getAddressInteractions,
+  getDuplicateTickers,
+} from "../../lib/queries";
+import { decodeP2TR } from "../../lib/bech32";
+import { fetchAddressStats, fetchAddressUtxos } from "../../lib/esplora";
+import { relativeTime, shortHex, displayAssetName, describeBadge } from "../../lib/format";
+
+const { addr } = Astro.params;
+if (!addr) return Astro.redirect("/");
+
+const decoded = decodeP2TR(addr);
+if (!decoded) {
+  Astro.response.status = 400;
+  return new Response(
+    `Not a valid bech32m P2TR address. tacitscan only supports Taproot (bc1p…/tb1p…) addresses — that's the address format used by Tacit creators and mint authorities.`,
+    { status: 400 },
+  );
+}
+
+const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
+const networkExpected = network === "mainnet" ? "bc" : "tb";
+if (decoded.hrp !== networkExpected) {
+  Astro.response.status = 400;
+  return new Response(
+    `Address is for ${decoded.hrp === "bc" ? "mainnet" : "testnet/signet"} but this indexer is running on ${network}.`,
+    { status: 400 },
+  );
+}
+
+const xonly = decoded.xonlyPubkeyHex;
+const [etched, mintAuthorityOf, interactions, stats, utxos, duplicates] = await Promise.all([
+  getAssetsEtchedBy(network, xonly),
+  getAssetsWithMintAuthority(network, xonly),
+  getAddressInteractions(network, addr, 100),
+  fetchAddressStats(addr),
+  fetchAddressUtxos(addr),
+  getDuplicateTickers(network),
+]);
+
+const balanceSats = stats ? stats.funded - stats.spent : null;
+
+// Etched assets and assets-with-this-address-as-mint-authority can
+// overlap (the etcher often is the mint authority too). De-dupe for
+// the "tokens" view so we don't double-list.
+const allAssetIds = new Set<string>();
+for (const a of etched) allAssetIds.add(a.assetId);
+for (const a of mintAuthorityOf) {
+  if (!allAssetIds.has(a.assetId)) {
+    etched.push(a); // mutating; this is a render-time helper, fine.
+    allAssetIds.add(a.assetId);
+  }
+}
+
+const title = `Address ${shortHex(addr, 10, 6)} · tacitscan`;
+const description = `Bitcoin Taproot address ${addr}. Sats balance${balanceSats != null ? ` ${balanceSats.toLocaleString()} sats` : ""}, ${etched.length} associated tacit asset${etched.length === 1 ? "" : "s"}, ${interactions.length} tacit tx interaction${interactions.length === 1 ? "" : "s"}.`;
+---
+
+<Layout title={title} description={description}>
+  <h1 style="margin-bottom:4px">Address</h1>
+  <div class="mono" style="word-break:break-all;font-size:13px">{addr}</div>
+  <div class="muted" style="font-size:12px;margin-top:4px">P2TR · x-only pubkey {shortHex(xonly, 10, 6)}</div>
+
+  <h2>Bitcoin</h2>
+  <dl class="kv">
+    <dt>balance</dt>
+    <dd class="mono">
+      {balanceSats != null ? `${balanceSats.toLocaleString()} sats` : <span class="muted">— Esplora unavailable</span>}
+    </dd>
+    {stats && (
+      <>
+        <dt>received</dt>
+        <dd class="mono">{stats.funded.toLocaleString()} sats <span class="muted">across {stats.txCount} txs</span></dd>
+        <dt>sent</dt>
+        <dd class="mono">{stats.spent.toLocaleString()} sats</dd>
+      </>
+    )}
+    {utxos && utxos.length > 0 && (
+      <>
+        <dt>utxos</dt>
+        <dd class="mono">{utxos.length} <span class="muted">· {utxos.filter((u) => !u.confirmed).length} pending</span></dd>
+      </>
+    )}
+  </dl>
+
+  <h2>Tacit assets <span class="muted" style="font-size:13px">({etched.length})</span></h2>
+  <p class="muted" style="margin-top:0;font-size:13px">
+    Assets where this address is the <strong>creator</strong> or <strong>mint authority</strong>. Token balances are
+    confidential by Tacit's design (Pedersen commitments) and cannot be shown.
+  </p>
+  {etched.length === 0 ? (
+    <p class="muted">No tacit assets associated with this address.</p>
+  ) : (
+    <div class="card" style="padding:0">
+      <table class="list">
+        <thead>
+          <tr>
+            <th style="width:160px">ticker</th>
+            <th>asset_id</th>
+            <th style="width:80px">kind</th>
+            <th style="width:110px">role</th>
+            <th style="width:100px">etched</th>
+          </tr>
+        </thead>
+        <tbody>
+          {etched.map((a) => {
+            const role = a.creatorPubkey === xonly ? "creator" : "mint authority";
+            const label = displayAssetName(a.ticker, a.assetId, duplicates.has(a.ticker));
+            return (
+              <tr>
+                <td>
+                  <a href={`/assets/${a.assetId}`} style="display:inline-flex;align-items:center;gap:6px">
+                    <strong>{label}</strong>
+                    <AssetMark assetId={a.assetId} size={12} />
+                  </a>
+                </td>
+                <td class="mono"><a href={`/assets/${a.assetId}`}>{shortHex(a.assetId, 10, 6)}</a></td>
+                <td><span class={`pill ${a.kind}`} data-tip={describeBadge(a.kind)}>{a.kind}</span></td>
+                <td class="muted">{role}</td>
+                <td class="mono">{a.etchHeight}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  )}
+
+  <h2>Tacit interactions <span class="muted" style="font-size:13px">({interactions.length})</span></h2>
+  <p class="muted" style="margin-top:0;font-size:13px">
+    Tacit transactions where this address appears on the Bitcoin side (paying the fee, receiving change, etc.).
+    <strong>This is NOT a list of tacit transfers this address sent or received</strong> — tacit asset ownership is
+    confidential and uses a NUMS-Hash internal pubkey, so the addresses on a CXFER/T_AXFER's vin/vout are unrelated to
+    the asset holder.
+  </p>
+  {interactions.length === 0 ? (
+    <p class="muted">No tacit txs touch this address.</p>
+  ) : (
+    <div class="card" style="padding:0">
+      <table class="list">
+        <thead>
+          <tr>
+            <th style="width:90px">opcode</th>
+            <th>txid</th>
+            <th style="width:130px">asset</th>
+            <th style="width:80px">role</th>
+            <th style="width:110px">when</th>
+          </tr>
+        </thead>
+        <tbody>
+          {interactions.map((r) => {
+            const isMempool = r.chain_status === "mempool";
+            const label =
+              r.ticker && r.asset_id
+                ? displayAssetName(r.ticker, r.asset_id, duplicates.has(r.ticker))
+                : null;
+            return (
+              <tr>
+                <td><span class={`pill ${r.opcode.toLowerCase()}`}>{r.opcode}</span></td>
+                <td class="mono"><a href={`/tx/${r.txid}`}>{shortHex(r.txid, 14, 6)}</a></td>
+                <td>
+                  {label ? (
+                    <a href={`/assets/${r.asset_id}`}>{label}</a>
+                  ) : (
+                    <span class="muted">—</span>
+                  )}
+                </td>
+                <td class="muted">{r.role}</td>
+                <td class="muted">
+                  {isMempool ? (
+                    <span class="conf-badge conf-mempool" style="font-size:11px">pending</span>
+                  ) : (
+                    r.block_time ? relativeTime(r.block_time) : ""
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  )}
+</Layout>

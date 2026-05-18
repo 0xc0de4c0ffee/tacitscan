@@ -1,0 +1,29 @@
+{
+  "name": "tacitscan-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/check": "0.9.4",
+    "@astrojs/vercel": "10.0.6",
+    "@types/node": "22.13.0",
+    "astro": "6.3.1",
+    "drizzle-orm": "0.36.0",
+    "postgres": "3.4.4",
+    "typescript": "5.6.2",
+    "viem": "^2.48.11",
+    "wns-utils": "^0.2.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp"
+    ]
+  }
+}

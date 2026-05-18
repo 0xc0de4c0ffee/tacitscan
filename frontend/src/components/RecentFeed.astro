@@ -1,0 +1,121 @@
+---
+import { OPCODE_DESCRIPTIONS } from "../lib/format";
+
+interface Row {
+  txid: string;
+  opcode: string;
+  assetId: string | null;
+  blockHeight: number | null;
+  blockTime: Date | string | null;
+  chainStatus?: string;
+  firstSeenAt?: Date | string | null;
+  ticker: string | null;
+  displayName?: string | null;
+}
+
+interface Props {
+  initialRows: Row[];
+}
+const { initialRows } = Astro.props;
+const initialJson = JSON.stringify(initialRows);
+---
+
+<div id="feed" data-initial={initialJson}>
+  <table class="list">
+    <thead>
+      <tr>
+        <th style="width: 90px">opcode</th>
+        <th>txid</th>
+        <th style="width: 130px">asset</th>
+        <th style="width: 100px">block</th>
+        <th style="width: 110px">when</th>
+      </tr>
+    </thead>
+    <tbody id="feedBody"></tbody>
+  </table>
+</div>
+
+<script is:inline define:vars={{ OPCODE_DESCRIPTIONS }}>
+  const feed = document.getElementById("feed");
+  const body = document.getElementById("feedBody");
+  if (feed && body) {
+    const initial = JSON.parse(feed.dataset.initial || "[]");
+
+    function relTime(t) {
+      const ms = new Date(t).getTime();
+      const diff = Date.now() - ms;
+      const sec = Math.floor(diff / 1000);
+      if (sec < 60) return `${sec}s ago`;
+      const min = Math.floor(sec / 60);
+      if (min < 60) return `${min}m ago`;
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return `${hr}h ago`;
+      const day = Math.floor(hr / 24);
+      return `${day}d ago`;
+    }
+
+    function escape(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+      );
+    }
+
+    function render(rows) {
+      body.innerHTML = rows
+        .map((r) => {
+          const opcls = (r.opcode || "unknown").toLowerCase();
+          // Prefer the API's pre-formatted displayName (which appends
+          // #fragment when the ticker collides with another asset).
+          const label = r.displayName || r.ticker;
+          const tickerCell = label
+            ? `<a href="/assets/${r.assetId}">${escape(label)}</a>`
+            : r.assetId
+              ? `<a href="/assets/${r.assetId}" class="mono">${r.assetId.slice(0, 10)}…</a>`
+              : `<span class="muted">—</span>`;
+          const tip = OPCODE_DESCRIPTIONS[r.opcode] || "";
+          const isMempool = r.chainStatus === "mempool";
+          const blockCell = isMempool
+            ? `<span class="conf-badge conf-mempool" style="font-size:11px">pending</span>`
+            : `<span class="mono">${r.blockHeight ?? ""}</span>`;
+          const whenSrc = isMempool ? r.firstSeenAt : r.blockTime;
+          const whenCell = whenSrc ? relTime(whenSrc) : "";
+          return `
+          <tr>
+            <td><span class="pill ${opcls}" data-tip="${escape(tip)}">${escape(r.opcode)}</span></td>
+            <td><a href="/tx/${r.txid}" class="mono">${r.txid.slice(0, 16)}…${r.txid.slice(-6)}</a></td>
+            <td>${tickerCell}</td>
+            <td>${blockCell}</td>
+            <td class="muted">${whenCell}</td>
+          </tr>`;
+        })
+        .join("");
+    }
+
+    render(initial);
+
+    let timer = null;
+    async function tick() {
+      try {
+        const r = await fetch("/api/feed");
+        if (r.ok) {
+          const data = await r.json();
+          render(data.rows);
+        }
+      } catch {
+        // noop
+      } finally {
+        timer = setTimeout(tick, 15000);
+      }
+    }
+    timer = setTimeout(tick, 15000);
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden && timer) {
+        clearTimeout(timer);
+        timer = null;
+      } else if (!timer) {
+        tick();
+      }
+    });
+  }
+</script>

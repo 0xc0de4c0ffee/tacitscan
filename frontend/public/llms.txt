@@ -1,0 +1,38 @@
+# tacitscan
+
+> Block explorer for [Tacit](https://github.com/z0r0z/tacit), a confidential token meta-protocol on Bitcoin. Tacit envelopes ride in Bitcoin Taproot witness data and are validated by indexers, not by Bitcoin nodes. tacitscan decodes every Tacit envelope on chain and presents assets, transfers, mints, burns, and atomic swaps in a browseable UI.
+
+Source: <https://github.com/nerderlyne/tacitscan>. Data via [dRPC](https://drpc.org) (Bitcoin JSON-RPC) and [mempool.space](https://mempool.space) (Esplora REST, fallback).
+
+## Page URLs
+
+- [/](https://tacitscan.io/): homepage with sync status, latest envelopes feed, and latest assets list
+- [/assets](https://tacitscan.io/assets): directory of every CETCH and T_PETCH asset observed on Bitcoin mainnet
+- `/assets/{asset_id}`: per-asset card with mints, burns, transfers, cap progress, image. `asset_id` is `SHA256(reverse(reveal_txid_bytes) || vout_LE)` — 64 lowercase hex chars
+- `/tx/{txid}`: full envelope decode for a single Bitcoin transaction. `txid` is the 64-char displayed-form Bitcoin txid
+- `/utxo/{txid}/{vout}`: single Tacit UTXO with its Pedersen commitment, parent envelope, and ancestry pointer
+
+## JSON API
+
+- `/api/health`: indexer status, chain tip, blocks behind tip, last cursor update
+- `/api/feed`: 25 most recent envelopes (refreshed every 15 seconds)
+- `/api/search?q=`: search by ticker substring, asset_id prefix, or txid prefix
+
+## Tacit envelope opcodes
+
+| opcode | byte | meaning |
+| --- | --- | --- |
+| `CETCH` | 0x21 | Confidential etch — issues a new asset with hidden supply |
+| `CXFER` | 0x23 | Confidential transfer — moves balances without revealing amounts |
+| `T_MINT` | 0x24 | Issuer mint — adds supply on a mintable CETCH asset |
+| `T_BURN` | 0x25 | Burn — destroys supply (amount public) |
+| `T_AXFER` | 0x26 | Atomic OTC settlement — confidential transfer mixed with BTC payment |
+| `T_PETCH` | 0x27 | Permissionless-mint deployment — declares a fair-launch asset |
+| `T_PMINT` | 0x28 | Permissionless mint — claims a tranche against a T_PETCH (amount public) |
+| `T_DEPOSIT` | 0x29 | Mixer deposit — anonymizes a UTXO into a per-asset pool |
+| `T_WITHDRAW` | 0x2A | Mixer withdrawal — anonymous mint from a pool, gated by zk proof |
+
+## Protocol references
+
+- [Tacit GitHub](https://github.com/z0r0z/tacit)
+- [Tacit SPEC.md](https://github.com/z0r0z/tacit/blob/main/SPEC.md) — authoritative wire format and validator algorithm

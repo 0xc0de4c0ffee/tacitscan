@@ -1,0 +1,178 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import AssetMark from "../../components/AssetMark.astro";
+import { getEnvelopesPage, getEnvelopesCount, getDuplicateTickers, getOpcodeCounts } from "../../lib/queries";
+import { shortHex, formatAmount, relativeTime, describeBadge, displayAssetName, OPCODE_DESCRIPTIONS } from "../../lib/format";
+
+const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
+const page = Math.max(0, Number(Astro.url.searchParams.get("p") ?? 0));
+// Allow opcode filter via ?opcode=CETCH (case-insensitive, upper-cased
+// before query since indexer normalises). Empty / "all" / unknown opcode
+// just falls back to the unfiltered view.
+const rawOpcode = (Astro.url.searchParams.get("opcode") || "").trim().toUpperCase();
+const opcodeFilter = rawOpcode && rawOpcode !== "ALL" ? rawOpcode : null;
+const PAGE = 50;
+
+const [rows, total, duplicates, opcodeCounts] = await Promise.all([
+  getEnvelopesPage({ limit: PAGE, offset: page * PAGE, opcode: opcodeFilter }),
+  getEnvelopesCount(opcodeFilter),
+  getDuplicateTickers(network),
+  getOpcodeCounts(),
+]);
+
+const totalPages = Math.max(1, Math.ceil(total / PAGE));
+const currentPage = Math.min(page, totalPages - 1);
+// Build the opcode filter chips. Order by descending count so the most
+// common opcodes (CXFER) appear first; "all" pinned at the start.
+const opcodeOptions: { value: string | null; label: string; count: number }[] = [
+  { value: null, label: "all", count: Object.values(opcodeCounts).reduce((s, c) => s + c, 0) },
+  ...Object.entries(opcodeCounts).map(([op, c]) => ({ value: op, label: op, count: c })),
+];
+
+function withParams(p: number | null, opcode: string | null) {
+  const params = new URLSearchParams();
+  if (p !== null && p > 0) params.set("p", String(p));
+  if (opcode) params.set("opcode", opcode);
+  const qs = params.toString();
+  return qs ? `/activity?${qs}` : "/activity";
+}
+
+function buildPageList(current: number, totalP: number, window = 2): (number | "…")[] {
+  if (totalP <= 7) return Array.from({ length: totalP }, (_, i) => i);
+  const set = new Set<number>([0, totalP - 1, current]);
+  for (let d = 1; d <= window; d++) {
+    if (current - d >= 0) set.add(current - d);
+    if (current + d <= totalP - 1) set.add(current + d);
+  }
+  const sorted = [...set].sort((a, b) => a - b);
+  const out: (number | "…")[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i]! - sorted[i - 1]! > 1) out.push("…");
+    out.push(sorted[i]!);
+  }
+  return out;
+}
+const pages = buildPageList(currentPage, totalPages);
+---
+
+<Layout title={opcodeFilter ? `${opcodeFilter} activity · tacitscan` : "activity · tacitscan"} description={`${total.toLocaleString()} ${opcodeFilter ?? "Tacit"} envelopes observed on chain, newest first.`}>
+  <h1>Activity {opcodeFilter && <span class="muted" style="font-size:0.7em;font-weight:400">· filtered to {opcodeFilter}</span>}</h1>
+  <p class="muted">
+    {opcodeFilter ? (
+      <>{total.toLocaleString()} <strong>{opcodeFilter}</strong> envelopes. {OPCODE_DESCRIPTIONS[opcodeFilter] ?? ""}</>
+    ) : (
+      <>All {total.toLocaleString()} Tacit envelopes observed on chain, newest first. Mempool entries appear at the top with a pending badge.</>
+    )}
+  </p>
+
+  <div class="opcode-filter" style="display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 18px;">
+    {opcodeOptions.map((o) => {
+      const isActive = (o.value ?? null) === opcodeFilter;
+      return (
+        <a
+          href={withParams(0, o.value)}
+          class={`opcode-chip ${isActive ? "opcode-chip-active" : ""}`}
+          aria-current={isActive ? "page" : undefined}
+        >
+          {o.label} <span class="muted" style="font-size:11px;margin-left:2px;">{o.count.toLocaleString()}</span>
+        </a>
+      );
+    })}
+  </div>
+
+  <div class="card" style="padding:0">
+    <table class="list">
+      <thead>
+        <tr>
+          <th style="width:90px">opcode</th>
+          <th>txid</th>
+          <th style="width:130px">asset</th>
+          <th style="width:100px;text-align:right">block</th>
+          <th style="width:110px">when</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.length === 0 ? (
+          <tr>
+            <td colspan="5" class="muted" style="text-align:center;padding:30px">
+              no envelopes yet
+            </td>
+          </tr>
+        ) : (
+          rows.map((r) => {
+            const isMempool = r.chainStatus === "mempool";
+            const label = r.ticker && r.assetId ? displayAssetName(r.ticker, r.assetId, duplicates.has(r.ticker)) : null;
+            return (
+              <tr>
+                <td>
+                  <span class={`pill ${r.opcode.toLowerCase()}`} data-tip={OPCODE_DESCRIPTIONS[r.opcode] ?? r.opcode}>{r.opcode}</span>
+                </td>
+                <td>
+                  <a href={`/tx/${r.txid}`} class="mono">{shortHex(r.txid, 14, 6)}</a>
+                  {r.publicAmount != null && r.decimals != null && (
+                    <span class="muted" style="font-size:12px;margin-left:6px">· {formatAmount(r.publicAmount, r.decimals)}</span>
+                  )}
+                </td>
+                <td>
+                  {label && r.assetId ? (
+                    <a href={`/assets/${r.assetId}`} style="display:inline-flex;align-items:center;gap:4px">
+                      <strong>{label}</strong>
+                      <AssetMark assetId={r.assetId} size={12} />
+                    </a>
+                  ) : (
+                    <span class="muted">—</span>
+                  )}
+                </td>
+                <td class="mono" style="text-align:right">
+                  {isMempool ? (
+                    <span class="conf-badge conf-mempool" style="font-size:11px">pending</span>
+                  ) : (
+                    r.blockHeight ?? "—"
+                  )}
+                </td>
+                <td class="muted">
+                  {isMempool ? relativeTime(r.firstSeenAt) : r.blockTime ? relativeTime(r.blockTime) : ""}
+                </td>
+              </tr>
+            );
+          })
+        )}
+      </tbody>
+    </table>
+  </div>
+
+  {totalPages > 1 && (
+    <nav class="pager" aria-label="pagination" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:18px;">
+      {currentPage > 0 && (
+        <a href={withParams(currentPage - 1, opcodeFilter)} class="pager-page" rel="prev">← prev</a>
+      )}
+      {pages.map((p) => p === "…" ? (
+        <span class="pager-gap">…</span>
+      ) : (
+        <a
+          href={withParams(p, opcodeFilter)}
+          class={`pager-page ${p === currentPage ? "pager-current" : ""}`}
+          aria-current={p === currentPage ? "page" : undefined}
+        >{p + 1}</a>
+      ))}
+      {currentPage < totalPages - 1 && (
+        <a href={withParams(currentPage + 1, opcodeFilter)} class="pager-page" rel="next">next →</a>
+      )}
+      <span class="muted" style="font-size:12px;margin-left:8px;">
+        page {currentPage + 1} of {totalPages.toLocaleString()} · {total.toLocaleString()} {opcodeFilter ?? "envelopes"}
+      </span>
+    </nav>
+  )}
+
+  <style>
+    .opcode-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 10px; border: 1px solid var(--ink-faint, #ddd); border-radius: 999px;
+      font-size: 12px; text-decoration: none; color: var(--ink, #1e2329);
+      background: var(--bg, #fff); text-transform: uppercase; letter-spacing: 0.02em;
+    }
+    .opcode-chip:hover { border-color: var(--ink, #1e2329); }
+    .opcode-chip-active { background: var(--ink, #1e2329); color: var(--bg, #fff); }
+    .opcode-chip-active .muted { color: rgba(255,255,255,0.7) !important; }
+  </style>
+</Layout>

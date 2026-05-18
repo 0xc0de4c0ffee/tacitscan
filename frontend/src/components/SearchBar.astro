@@ -1,0 +1,91 @@
+---
+// Vanilla-JS search island. Posts to /api/search and renders results.
+---
+
+<div class="searchbar">
+  <input
+    type="text"
+    placeholder="Search txid, asset_id, or ticker…"
+    autocomplete="off"
+    spellcheck="false"
+    id="searchInput"
+  />
+  <div class="results" id="searchResults"></div>
+</div>
+
+<script>
+  const input = document.getElementById("searchInput") as HTMLInputElement;
+  const results = document.getElementById("searchResults") as HTMLDivElement;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let lastQ = "";
+
+  function escape(s: string): string {
+    return s.replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
+    );
+  }
+
+  async function run(q: string): Promise<void> {
+    if (!q) {
+      results.classList.remove("open");
+      results.innerHTML = "";
+      return;
+    }
+    if (q === lastQ) return;
+    lastQ = q;
+    try {
+      const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      let html = "";
+      if (data.assets?.length) {
+        html += `<div class="group">assets</div>`;
+        for (const a of data.assets) {
+          const name = a.displayName || a.ticker;
+          const mark = a.identicon
+            ? `<span class="asset-mark" style="width:14px;height:14px">${a.identicon}</span>`
+            : "";
+          html += `<a href="/assets/${a.assetId}"><strong>${escape(name)}</strong>${mark} <span class="muted">${a.kind}</span> · ${a.assetId.slice(0, 16)}…</a>`;
+        }
+      }
+      if (data.txids?.length) {
+        html += `<div class="group">transactions</div>`;
+        for (const t of data.txids) {
+          html += `<a href="/tx/${t.txid}">${t.opcode} · ${t.txid.slice(0, 24)}…</a>`;
+        }
+      }
+      if (!html) html = `<div class="group">no matches</div>`;
+      results.innerHTML = html;
+      results.classList.add("open");
+    } catch {
+      // noop
+    }
+  }
+
+  input.addEventListener("input", () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => run(input.value.trim()), 150);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const q = input.value.trim();
+      if (/^[0-9a-f]{64}$/i.test(q)) {
+        // Looks like a full txid or asset_id. Try asset first; if not found,
+        // tx page will 404 itself. We'll heuristically check length only.
+        window.location.href = `/tx/${q}`;
+      }
+    }
+    if (e.key === "Escape") {
+      results.classList.remove("open");
+      input.blur();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!(e.target instanceof Element)) return;
+    if (!e.target.closest(".searchbar")) {
+      results.classList.remove("open");
+    }
+  });
+</script>

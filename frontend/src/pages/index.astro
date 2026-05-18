@@ -1,0 +1,269 @@
+---
+import Layout from "../layouts/Layout.astro";
+import { getRecentEnvelopes, getCursor, getDuplicateTickers } from "../lib/queries";
+import { sql, desc, eq } from "drizzle-orm";
+import { db, schema } from "../db";
+import { shortHex, relativeTime, formatAmount, describeBadge, displayAssetName } from "../lib/format";
+import { fetchChainTip, lagToHuman } from "../lib/tip";
+import AssetThumb from "../components/AssetThumb.astro";
+import AssetMark from "../components/AssetMark.astro";
+
+const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
+
+const [recent, cursor, statsRow, recentAssets, tip, duplicates] = await Promise.all([
+  getRecentEnvelopes(10),
+  getCursor(network),
+  db.execute<{ assets: number; envelopes: number; cetch: number; t_petch: number; minted: string }>(sql`
+    SELECT
+      (SELECT COUNT(*) FROM assets WHERE network = ${network})::int AS assets,
+      (SELECT COUNT(*) FROM envelopes WHERE network = ${network})::int AS envelopes,
+      (SELECT COUNT(*) FROM assets WHERE network = ${network} AND kind = 'cetch')::int AS cetch,
+      (SELECT COUNT(*) FROM assets WHERE network = ${network} AND kind = 't_petch')::int AS t_petch,
+      (SELECT COALESCE(SUM(public_amount), 0)::text FROM envelopes WHERE network = ${network} AND opcode = 'T_PMINT' AND status = 'ok') AS minted
+  `),
+  db
+    .select()
+    .from(schema.assets)
+    .where(eq(schema.assets.network, network))
+    .orderBy(desc(schema.assets.etchHeight))
+    .limit(10),
+  fetchChainTip(),
+  getDuplicateTickers(network),
+]);
+
+const s = statsRow[0] ?? { assets: 0, envelopes: 0, cetch: 0, t_petch: 0, minted: "0" };
+
+const lag = tip !== null && cursor ? Math.max(0, tip - cursor.lastIndexedHeight) : null;
+const syncState =
+  lag === null ? "unknown" : lag <= 5 ? "synced" : lag <= 100 ? "behind" : "far-behind";
+
+const homeJsonLd = [
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "tacitscan",
+    url: "https://tacitscan.io",
+    description: "Block explorer for Tacit, the confidential token meta-protocol on Bitcoin.",
+    potentialAction: {
+      "@type": "SearchAction",
+      target: {
+        "@type": "EntryPoint",
+        urlTemplate: "https://tacitscan.io/api/search?q={search_term_string}",
+      },
+      "query-input": "required name=search_term_string",
+    },
+  },
+];
+---
+
+<Layout
+  title="tacitscan — Tacit block explorer"
+  description="Block explorer for Tacit, the confidential token meta-protocol on Bitcoin. Browse confidential token etches, transfers, fair-launch mints, and burns."
+  jsonLd={homeJsonLd}
+>
+  {
+    cursor && (
+      <div class={`sync-banner sync-${syncState}`}>
+        <span class="sync-dot" />
+        <span class="sync-text">
+          {syncState === "synced" && (
+            <>
+              <strong>Synced</strong> — indexed to block <span class="mono">{cursor.lastIndexedHeight}</span>
+              {tip !== null && <span class="muted"> / tip {tip}</span>}
+            </>
+          )}
+          {syncState === "behind" && (
+            <>
+              <strong>Catching up</strong> — block <span class="mono">{cursor.lastIndexedHeight}</span>
+              {" of "}
+              <span class="mono">{tip}</span>
+              <span class="muted"> · {lag} behind ({lagToHuman(lag!)})</span>
+            </>
+          )}
+          {syncState === "far-behind" && (
+            <>
+              <strong>Backfilling</strong> — block <span class="mono">{cursor.lastIndexedHeight}</span>
+              {" of "}
+              <span class="mono">{tip}</span>
+              <span class="muted"> · {lag} blocks behind ({lagToHuman(lag!)})</span>
+            </>
+          )}
+          {syncState === "unknown" && (
+            <>
+              <strong>Indexer running</strong> — at block <span class="mono">{cursor.lastIndexedHeight}</span>
+              <span class="muted"> · tip unavailable</span>
+            </>
+          )}
+        </span>
+      </div>
+    )
+  }
+
+  <section class="hero">
+    <h1>Tacit Block Explorer</h1>
+    <p class="lede">
+      Tacit is a confidential-token meta-protocol on Bitcoin. tacitscan decodes every
+      Tacit envelope on chain — etches, transfers, mints, burns — and lets you walk
+      through what's there.
+    </p>
+    <div class="stats-grid">
+      <div class="stat">
+        <span class="icon">◎</span>
+        <div>
+          <div class="label">Assets</div>
+          <div class="value">{s.assets}</div>
+        </div>
+      </div>
+      <div class="stat">
+        <span class="icon green">▲</span>
+        <div>
+          <div class="label">Envelopes</div>
+          <div class="value">{s.envelopes}</div>
+        </div>
+      </div>
+      <div class="stat">
+        <span class="icon blue">◌</span>
+        <div>
+          <div class="label">CETCH / T_PETCH</div>
+          <div class="value">{s.cetch} / {s.t_petch}</div>
+        </div>
+      </div>
+      <div class="stat">
+        <span class="icon">⌁</span>
+        <div>
+          <div class="label">Indexed to</div>
+          <div class="value">{cursor?.lastIndexedHeight ?? "—"}</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="two-col">
+    <div class="card">
+      <div class="card-header">
+        <span>Latest envelopes</span>
+        <a href="/assets">view assets →</a>
+      </div>
+      <table class="list">
+        <tbody>
+          {
+            recent.length === 0 ? (
+              <tr>
+                <td colspan="3" class="muted" style="text-align:center;padding:30px">
+                  no envelopes indexed yet
+                </td>
+              </tr>
+            ) : (
+              recent.map((r) => (
+                <tr>
+                  <td class="icon-cell">
+                    <span class="opcode-icon">
+                      {r.opcode.replace(/^T_/, "").slice(0, 4)}
+                    </span>
+                  </td>
+                  <td>
+                    <div>
+                      <span class={`pill ${r.opcode.toLowerCase()}`} data-tip={describeBadge(r.opcode)}>{r.opcode}</span>
+                      <a href={`/tx/${r.txid}`} class="mono" style="margin-left:8px">
+                        {shortHex(r.txid, 10, 6)}
+                      </a>
+                    </div>
+                    <div class="muted" style="font-size:12px;margin-top:2px;display:inline-flex;align-items:center">
+                      {r.ticker && r.assetId ? (
+                        <a href={`/assets/${r.assetId}`} style="display:inline-flex;align-items:center">
+                          <strong>{displayAssetName(r.ticker, r.assetId, duplicates.has(r.ticker))}</strong>
+                          <AssetMark assetId={r.assetId} size={12} />
+                        </a>
+                      ) : r.assetId ? (
+                        <span class="mono">{shortHex(r.assetId, 10, 6)}</span>
+                      ) : (
+                        ""
+                      )}
+                      {r.publicAmount && r.decimals !== null
+                        ? ` · ${formatAmount(r.publicAmount, r.decimals)}`
+                        : ""}
+                    </div>
+                  </td>
+                  <td style="text-align:right">
+                    {r.chainStatus === "mempool" ? (
+                      <>
+                        <div class="mono conf-mempool" style="font-size:11px;display:inline-flex;padding:1px 6px;border-radius:6px">pending</div>
+                        <div class="muted" style="font-size:11px">{relativeTime(r.firstSeenAt)}</div>
+                      </>
+                    ) : (
+                      <>
+                        <div class="mono" style="font-size:12px">{r.blockHeight}</div>
+                        <div class="muted" style="font-size:11px">{r.blockTime ? relativeTime(r.blockTime) : ""}</div>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              ))
+            )
+          }
+        </tbody>
+      </table>
+      <div class="card-footer">
+        <a href="/activity">View all activity →</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Latest assets</span>
+        <a href="/assets">view all →</a>
+      </div>
+      <table class="list">
+        <tbody>
+          {
+            recentAssets.length === 0 ? (
+              <tr>
+                <td colspan="3" class="muted" style="text-align:center;padding:30px">
+                  no assets yet
+                </td>
+              </tr>
+            ) : (
+              recentAssets.map((a) => (
+                <tr>
+                  <td class="icon-cell">
+                    <AssetThumb
+                      imageUri={a.imageUri}
+                      resolvedImageUrl={a.resolvedImageUrl}
+                      assetId={a.assetId}
+                      ticker={a.ticker}
+                      size={28}
+                    />
+                  </td>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                      <a href={`/assets/${a.assetId}`} style="display:inline-flex;align-items:center">
+                        <strong>{a.ticker}</strong>
+                        <AssetMark assetId={a.assetId} size={12} />
+                        {duplicates.has(a.ticker) && (
+                          <span class="muted mono" style="font-size:11px;margin-left:4px">
+                            #{a.assetId.slice(0, 8)}
+                          </span>
+                        )}
+                      </a>
+                      <span class={`pill ${a.kind}`} data-tip={describeBadge(a.kind)}>{a.kind}</span>
+                    </div>
+                    <div class="muted mono" style="font-size:12px;margin-top:2px">
+                      {shortHex(a.assetId, 10, 6)}
+                    </div>
+                  </td>
+                  <td style="text-align:right">
+                    <div class="mono" style="font-size:12px">block {a.etchHeight}</div>
+                    <div class="muted" style="font-size:11px">{relativeTime(a.etchBlockTime)}</div>
+                  </td>
+                </tr>
+              ))
+            )
+          }
+        </tbody>
+      </table>
+      <div class="card-footer">
+        <a href="/assets">All assets →</a>
+      </div>
+    </div>
+  </div>
+</Layout>
