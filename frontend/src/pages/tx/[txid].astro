@@ -3,7 +3,7 @@ import Layout from "../../layouts/Layout.astro";
 import AssetMark from "../../components/AssetMark.astro";
 import AssetThumb from "../../components/AssetThumb.astro";
 import { getEnvelope, getCommitmentsByTx, setEnvelopeFee, getDuplicateTickers, getIndexerTipHeight } from "../../lib/queries";
-import { bytesToHex, formatAmount, relativeTime, shortHex, OPCODE_DESCRIPTIONS, describeBadge, displayAssetName } from "../../lib/format";
+import { bytesToHex, formatAmount, relativeTime, shortHex, OPCODE_DESCRIPTIONS, describeBadge, describeUnknownEnvelope, displayAssetName } from "../../lib/format";
 import { fetchTxFee } from "../../lib/esplora";
 import { fetchAssetMetadata, formatRevealedSupply } from "../../lib/etch-metadata";
 import airdropHistory from "../../data/airdrop-history.json";
@@ -20,6 +20,11 @@ const commitments = await getCommitmentsByTx(txid);
 const network = import.meta.env.PUBLIC_NETWORK ?? "mainnet";
 const duplicates = asset ? await getDuplicateTickers(network) : new Set<string>();
 const assetDisplay = asset ? displayAssetName(asset.ticker, asset.assetId, duplicates.has(asset.ticker)) : "";
+
+// For UNKNOWN-opcode envelopes, split the display between "forward-compat
+// unknown opcode" (spec-compliant no-op) and "actually malformed" (wrapper
+// or sub-decoder failure). See describeUnknownEnvelope for the split.
+const unknownInfo = env.opcode === "UNKNOWN" ? describeUnknownEnvelope(env.decodeError) : null;
 
 // Confirmation count. Bitcoin reorgs >5 blocks have never happened on
 // mainnet post-2013, so the tiers are tighter than a general explorer
@@ -200,13 +205,17 @@ const jsonLd = {
     )}
     <h1 style="margin:0">{env.opcode}{asset && <> <span class="muted" style="font-weight:500;">·</span> <a href={`/assets/${asset.assetId}`} style="color:inherit;">{assetDisplay}</a></>}</h1>
     <span class={`pill ${env.opcode.toLowerCase()}`} data-tip={describeBadge(env.opcode)}>{env.opcode}</span>
-    <span class={env.status === "ok" ? "status-ok" : "status-malformed"} style="font-size:12px">
-      {env.status === "ok" ? "✓ decoded" : "✗ " + (env.decodeError ?? env.status)}
+    <span class={env.status === "ok" ? "status-ok" : (unknownInfo?.isForwardCompat ? "status-unknown" : "status-malformed")} style="font-size:12px">
+      {env.status === "ok"
+        ? "✓ decoded"
+        : unknownInfo?.isForwardCompat
+          ? "ⓘ " + unknownInfo.label
+          : "✗ " + (unknownInfo?.label ?? env.decodeError ?? env.status)}
     </span>
     <span class={`conf-badge conf-${confLevel}`} data-tip={CONF_LABEL[confLevel]}>{CONF_LABEL[confLevel]}</span>
   </div>
   <p class="muted" style="margin-top:6px;max-width:680px">
-    {OPCODE_DESCRIPTIONS[env.opcode] ?? ""}
+    {unknownInfo ? unknownInfo.detail : (OPCODE_DESCRIPTIONS[env.opcode] ?? "")}
   </p>
 
   {summary && (

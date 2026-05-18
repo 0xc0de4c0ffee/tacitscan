@@ -908,6 +908,12 @@ table.list .opcode-icon {
 .status-malformed {
   color: var(--red);
 }
+/* Forward-compat "unknown opcode" — wrapper parsed fine, opcode is just
+   outside the v1 spec. Neutral muted styling so it doesn't read as an
+   error (per SPEC §5 this is the expected indexer behavior). */
+.status-unknown {
+  color: var(--text-muted);
+}
 
 /* Confirmation badge — tiers tuned to Bitcoin reality: post-2013 mainnet
    has never seen >5-block reorgs and 1-block reorgs happen only a few

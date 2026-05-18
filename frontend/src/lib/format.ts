@@ -95,3 +95,37 @@ export function describeBadge(label: string | null | undefined): string {
   if (!label) return "";
   return OPCODE_DESCRIPTIONS[label] ?? OPCODE_DESCRIPTIONS[label.toUpperCase()] ?? "";
 }
+
+// Split the "UNKNOWN" bucket into the two cases users actually care about:
+//   1. Forward-compat — wrapper parsed fine, but the opcode byte is outside
+//      the v1 spec. Per SPEC §5 the indexer treats it as a no-op. Not an
+//      error: future-spec opcodes look exactly like this to a v1 indexer.
+//   2. Malformed — wrapper didn't decode (empty payload, trailing bytes,
+//      sub-decoder threw). This IS a real malformation.
+//
+// The persisted `decode_error` string carries the discriminator: matches
+// /^unknown opcode 0x[0-9a-f]+$/ for case 1, anything else for case 2.
+export function describeUnknownEnvelope(decodeError: string | null | undefined): {
+  label: string;
+  detail: string;
+  isForwardCompat: boolean;
+} {
+  const m = decodeError?.match(/^unknown opcode (0x[0-9a-f]+)$/i);
+  if (m) {
+    return {
+      label: `Unknown opcode ${m[1]}`,
+      detail:
+        "Envelope wrapper parsed correctly but the opcode byte isn't defined in the v1 spec. " +
+        "Per SPEC §5 the indexer treats this as a no-op — it could be a future-spec opcode, " +
+        "a wallet bug, or someone testing the envelope path.",
+      isForwardCompat: true,
+    };
+  }
+  return {
+    label: "Malformed envelope",
+    detail: decodeError
+      ? `Witness bytes didn't decode as a Tacit envelope: ${decodeError}.`
+      : "Witness bytes didn't decode as a Tacit envelope.",
+    isForwardCompat: false,
+  };
+}
