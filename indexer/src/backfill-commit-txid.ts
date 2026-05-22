@@ -10,16 +10,20 @@
 // 64-hex so the sentinel never collides.
 //
 // Cost: one Esplora fetchTx per NULL row, bounded by RATE_LIMIT_MS to
-// stay polite with the free mempool.space allowance. ~thousand
-// historical envelopes → ~30s at 30ms/req. Subsequent starts find an
-// empty result set and return immediately.
+// stay polite with the data source. ~thousand historical envelopes →
+// ~10s at 10ms/req. Subsequent starts find an empty result set and
+// return immediately.
+//
+// Recent rows first (ORDER BY block_height DESC) so freshly-published
+// commits resolve on tacitscan within a single batch cycle even when
+// the historical tail is still being walked.
 
 import { db, schema } from "./db.js";
 import { sql, eq } from "drizzle-orm";
 import { loadConfig, buildSource } from "./indexer.js";
 
 const BATCH = 200;
-const RATE_LIMIT_MS = 30;
+const RATE_LIMIT_MS = 10;
 const SENTINEL_UNRESOLVED = "-";
 
 function isTxidHex(s: string | null | undefined): s is string {
@@ -36,6 +40,7 @@ export async function backfillCommitTxid(): Promise<void> {
       .select({ txid: schema.envelopes.txid })
       .from(schema.envelopes)
       .where(sql`${schema.envelopes.commitTxid} IS NULL`)
+      .orderBy(sql`${schema.envelopes.blockHeight} DESC NULLS FIRST`)
       .limit(BATCH);
     if (rows.length === 0) break;
 
