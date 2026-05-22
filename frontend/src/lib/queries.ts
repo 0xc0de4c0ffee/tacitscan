@@ -305,6 +305,23 @@ export async function getEnvelope(txid: string) {
   return rows[0] ?? null;
 }
 
+// Resolve a commit-half txid back to the envelope it funded. Every tacit
+// envelope sits in vin[0]'s witness on a P2TR script-path spend, so the
+// prior tx is the commit; visiting /tx/<commit_txid> would otherwise 404
+// because the commit tx itself carries no envelope.
+export async function getEnvelopeByCommitTxid(commitTxid: string) {
+  const rows = await db
+    .select({
+      env: schema.envelopes,
+      asset: schema.assets,
+    })
+    .from(schema.envelopes)
+    .leftJoin(schema.assets, eq(schema.envelopes.assetId, schema.assets.assetId))
+    .where(eq(schema.envelopes.commitTxid, commitTxid))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 export async function setEnvelopeFee(txid: string, feeSats: bigint): Promise<void> {
   await db.update(schema.envelopes).set({ feeSats }).where(eq(schema.envelopes.txid, txid));
 }

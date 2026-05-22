@@ -2,7 +2,7 @@
 import Layout from "../../layouts/Layout.astro";
 import AssetMark from "../../components/AssetMark.astro";
 import AssetThumb from "../../components/AssetThumb.astro";
-import { getEnvelope, getCommitmentsByTx, setEnvelopeFee, getDuplicateTickers, getIndexerTipHeight } from "../../lib/queries";
+import { getEnvelope, getEnvelopeByCommitTxid, getCommitmentsByTx, setEnvelopeFee, getDuplicateTickers, getIndexerTipHeight } from "../../lib/queries";
 import { bytesToHex, formatAmount, relativeTime, shortHex, OPCODE_DESCRIPTIONS, describeBadge, describeUnknownEnvelope, displayAssetName } from "../../lib/format";
 import { fetchTxFee } from "../../lib/esplora";
 import { fetchAssetMetadata, formatRevealedSupply } from "../../lib/etch-metadata";
@@ -10,7 +10,19 @@ import airdropHistory from "../../data/airdrop-history.json";
 
 const { txid } = Astro.params;
 if (!txid) return Astro.redirect("/");
-const row = await getEnvelope(txid);
+let row = await getEnvelope(txid);
+// Commit-tx fallback: tacit envelopes live in the script-path witness of
+// the reveal tx, so the commit half has no envelope of its own. Surface
+// the linked reveal here (with a banner) instead of 404ing — the indexer
+// records the commit→reveal mapping at decode time.
+let matchedAsCommit = false;
+if (!row) {
+  const commitMatch = await getEnvelopeByCommitTxid(txid);
+  if (commitMatch) {
+    row = commitMatch;
+    matchedAsCommit = true;
+  }
+}
 if (!row) {
   Astro.response.status = 404;
   return new Response(`No Tacit envelope at txid ${txid}`, { status: 404 });
@@ -191,6 +203,17 @@ const jsonLd = {
   description={description}
   jsonLd={jsonLd}
 >
+  {matchedAsCommit && (
+    <section style="margin-bottom:18px;padding:12px 14px;border:1px solid var(--ink-faint,#ddd);border-radius:6px;background:var(--bg-warm,#fafafa);">
+      <p style="margin:0;font-size:13px;line-height:1.5;">
+        <strong>Commit tx.</strong> This txid (<code class="mono">{shortHex(txid, 8, 6)}</code>) funded the script-path commit
+        for the tacit envelope at reveal <a href={`/tx/${env.txid}`} class="mono">{shortHex(env.txid, 8, 6)}</a>.
+        The envelope payload lives in the reveal's <code>vin[0].witness</code>; this commit tx carries no envelope of its own.
+        Showing the linked reveal below.
+      </p>
+    </section>
+  )}
+
   <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
     {asset && (
       <a href={`/assets/${asset.assetId}`} style="display:inline-flex;align-items:center;text-decoration:none;">
@@ -241,8 +264,14 @@ const jsonLd = {
 
   <h2>Transaction</h2>
   <dl class="kv">
-    <dt>txid</dt>
+    <dt>txid <span class="muted">· reveal</span></dt>
     <dd class="mono">{env.txid}</dd>
+    {env.commitTxid && env.commitTxid !== "-" && (
+      <>
+        <dt>commit_txid</dt>
+        <dd class="mono"><a href={`/tx/${env.commitTxid}`}>{env.commitTxid}</a></dd>
+      </>
+    )}
     <dt>status</dt>
     <dd>
       <span class={`conf-badge conf-${confLevel}`}>{CONF_LABEL[confLevel]}</span>

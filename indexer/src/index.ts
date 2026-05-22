@@ -5,6 +5,7 @@ import { runMintValidator } from "./mint-validator.js";
 import { runMempoolPoller } from "./mempool.js";
 import { backfillSpendingPubkey } from "./backfill-spending-pubkey.js";
 import { backfillRedecode } from "./backfill-redecode.js";
+import { backfillCommitTxid } from "./backfill-commit-txid.js";
 
 // Five independent loops in the same process:
 //   indexer        — block walker, decodes envelopes, writes to DB
@@ -25,6 +26,9 @@ backfillSpendingPubkey().catch((e) => {
 });
 backfillRedecode().catch((e) => {
   console.error("[backfill-redecode] failed (continuing):", e);
+});
+backfillCommitTxid().catch((e) => {
+  console.error("[backfill-commit-txid] failed (continuing):", e);
 });
 
 // If the indexer crashes the process exits and Railway restarts us —

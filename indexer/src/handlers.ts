@@ -55,6 +55,12 @@ export async function persistEnvelope(
   // address-page Activity tab. Null for shape-malformed witnesses.
   const spendingPubkey = extractSpendingPubkey(rawWitness);
 
+  // The commit tx that funded this envelope. Tacit envelopes ride in a
+  // P2TR script-path spend at vin[0], so its prior txid IS the commit half.
+  // Stored so /tx/<commit_txid> can resolve back to this envelope row —
+  // the commit tx has no envelope of its own and would otherwise 404.
+  const commitTxid = tx.vin[0]?.txid ?? null;
+
   // Malformed / unknown envelope — record minimal row so the explorer can
   // still surface the tx.
   if (!result.ok) {
@@ -76,6 +82,7 @@ export async function persistEnvelope(
         status: "malformed",
         decodeError: result.reason,
         spendingPubkey,
+        commitTxid,
       })
       .onConflictDoUpdate({ target: schema.envelopes.txid, set: envelopeConfirmSet(ctx) });
     return;
@@ -97,6 +104,7 @@ export async function persistEnvelope(
     rawPayload: result.rawPayload,
     status: "ok",
     spendingPubkey,
+    commitTxid,
   } as const;
 
   switch (env.opcode) {

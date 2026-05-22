@@ -118,6 +118,13 @@ export const envelopes = pgTable(
     // shape-malformed witnesses may not have a recoverable spender.
     spendingPubkey: text("spending_pubkey"),
 
+    // The commit tx that funded this envelope's script-path input. Every
+    // tacit envelope sits in vin[0]'s witness on a P2TR script-path spend,
+    // so the prior tx (vin[0].txid) is its commit half. Stored verbatim so
+    // /tx/<commit_txid> can resolve to the same envelope page — the commit
+    // half has no envelope of its own and would otherwise 404.
+    commitTxid: text("commit_txid"),
+
     // Cryptographic validation result, populated by the validator loop
     // for T_PMINT envelopes. null until checked, true/false after.
     commitmentValid: boolean("commitment_valid"),
@@ -137,6 +144,7 @@ export const envelopes = pgTable(
     chainStatusIdx: index("envelopes_chain_status_idx").on(t.chainStatus, t.network),
     firstSeenIdx: index("envelopes_first_seen_idx").on(t.firstSeenAt),
     spendingPubkeyIdx: index("envelopes_spending_pubkey_idx").on(t.network, t.spendingPubkey, t.blockHeight),
+    commitTxidIdx: index("envelopes_commit_txid_idx").on(t.commitTxid),
   }),
 );
 
